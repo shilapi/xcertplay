@@ -54,6 +54,18 @@ object AirPlayFeatureCatalog {
 
     fun require(wireName: String): AirPlayFeature =
         requireNotNull(byName[wireName]) { "Unknown AirPlay feature '$wireName'" }
+
+    fun requiredRcsClientTypes(feature: AirPlayFeature): Set<RcsClientType> = when (feature) {
+        AirPlayFeature.VEHICLE_STATE_PROTOCOL -> setOf(
+            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
+            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA_2,
+        )
+
+        AirPlayFeature.UI_SYNC -> setOf(RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL)
+        AirPlayFeature.FILE_TRANSFER -> setOf(RcsClientTypes.CAR_PLAY_UPDATE_DATA)
+        AirPlayFeature.LOG_TRANSFER -> setOf(RcsClientTypes.CAR_PLAY_LOGGING_DATA)
+        else -> emptySet()
+    }
 }
 
 /** Fully implemented and currently ready features for one AirPlay control session. */
@@ -170,8 +182,8 @@ object AirPlayFeatureNegotiation {
             ?: when (feature) {
                 AirPlayFeature.HEVC -> emptyMap<String, Any?>()
                 AirPlayFeature.VEHICLE_STATE_PROTOCOL ->
-                    config.ultra?.vehicleStateProtocolInfo?.toWireMap()
-                AirPlayFeature.UI_SYNC -> config.ultra?.uiSyncInfo
+                    config.ultra?.vehicleStateProtocolInfo?.toInfoResponseMap()
+                AirPlayFeature.UI_SYNC -> config.ultra?.uiSyncInfo?.toWireMap()
                 AirPlayFeature.FILE_TRANSFER -> config.ultra?.fileTransferInfo
                 AirPlayFeature.LOG_TRANSFER -> config.ultra?.logTransferInfo
                 AirPlayFeature.MAIN_BUFFERED -> config.ultra?.mainBufferedInfo
@@ -256,7 +268,7 @@ object AirPlayFeatureNegotiation {
             )
         }
 
-        val requiredClientTypes = requiredRcsClientTypes(feature)
+        val requiredClientTypes = AirPlayFeatureCatalog.requiredRcsClientTypes(feature)
         if (requiredClientTypes.isNotEmpty()) {
             val runtime = ultra?.runtime
             requiredClientTypes.forEach { clientType ->
@@ -278,17 +290,6 @@ object AirPlayFeatureNegotiation {
     }
 }
 
-private fun requiredRcsClientTypes(feature: AirPlayFeature): Set<RcsClientType> = when (feature) {
-    AirPlayFeature.VEHICLE_STATE_PROTOCOL -> setOf(
-        RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
-        RcsClientTypes.CAR_PLAY_PROTOCOL_DATA_2,
-    )
-    AirPlayFeature.UI_SYNC -> setOf(RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL)
-    AirPlayFeature.FILE_TRANSFER -> setOf(RcsClientTypes.CAR_PLAY_UPDATE_DATA)
-    AirPlayFeature.LOG_TRANSFER -> setOf(RcsClientTypes.CAR_PLAY_LOGGING_DATA)
-    else -> emptySet()
-}
-
 private val BUILT_IN_FEATURES = setOf(
     AirPlayFeature.VIEW_AREAS,
     AirPlayFeature.ALT_SCREEN,
@@ -296,7 +297,7 @@ private val BUILT_IN_FEATURES = setOf(
     AirPlayFeature.IAP_CHANNEL,
 )
 
-private fun AirPlayVehicleStateProtocolInfo.toWireMap(): Map<String, Any?> {
+internal fun AirPlayVehicleStateProtocolInfo.toInfoResponseMap(): Map<String, Any?> {
     validate()
     return linkedMapOf(
         "protocolVersion" to protocolVersion,
@@ -316,6 +317,42 @@ private fun AirPlayVehicleStateProtocolInfo.validate() {
         throw AirPlayConfigurationException(
             "vehicleStateProtocolInfo.pluginConfigs must contain at least one plugin",
         )
+    }
+
+    val pluginIds = LinkedHashSet<Long>()
+    pluginConfigs.forEachIndexed { index, plugin ->
+        val pluginId = when (val value = plugin["pluginID"]) {
+            is Byte -> value.toLong()
+            is Short -> value.toLong()
+            is Int -> value.toLong()
+            is Long -> value
+            else -> throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginConfigs[$index].pluginID must be an integer",
+            )
+        }
+        if (pluginId < 0) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginConfigs[$index].pluginID must be non-negative",
+            )
+        }
+        if (!pluginIds.add(pluginId)) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo contains duplicate pluginID $pluginId",
+            )
+        }
+    }
+
+    pluginMapping.forEach { (name, pluginId) ->
+        if (name.isBlank()) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginMapping contains a blank plugin name",
+            )
+        }
+        if (pluginId !in pluginIds) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginMapping '$name' refers to unknown pluginID $pluginId",
+            )
+        }
     }
 }
 

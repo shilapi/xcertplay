@@ -294,8 +294,10 @@ class AirPlayInfoPlistTest {
                 "accessories" to listOf(mapOf("iid" to 1, "type" to 0x0000000001000001L)),
             ),
         )
-        val pluginMapping = mapOf(7L to "climate")
-        val uiSyncInfo = mapOf("schemaVersion" to 1, "supportsDashboard" to true)
+        val pluginMapping = mapOf("climate" to 7L)
+        val uiSyncInfo = AirPlayUiSyncInfo(
+            mapOf("schemaVersion" to 1, "supportsDashboard" to true),
+        )
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(
                 deviceName = "test",
@@ -324,7 +326,7 @@ class AirPlayInfoPlistTest {
                                 "pluginConfigs" to pluginConfigs,
                                 "pluginMapping" to pluginMapping,
                             ),
-                            AirPlayFeature.UI_SYNC to uiSyncInfo,
+                            AirPlayFeature.UI_SYNC to uiSyncInfo.toWireMap(),
                         ),
                         rcsClientTypes = setOf(
                             RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
@@ -346,7 +348,7 @@ class AirPlayInfoPlistTest {
         assertTrue(vehicle["pluginConfigs"] is List<*>)
         assertEquals(pluginConfigs, vehicle["pluginConfigs"])
         assertEquals(pluginMapping, vehicle["pluginMapping"])
-        assertEquals(uiSyncInfo, info["uiSyncInfo"])
+        assertEquals(uiSyncInfo.toWireMap(), info["uiSyncInfo"])
     }
 
     @Test
@@ -407,7 +409,7 @@ class AirPlayInfoPlistTest {
                     vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
                         pluginConfigs = listOf(mapOf("pluginID" to 7)),
                     ),
-                    uiSyncInfo = mapOf("schemaVersion" to 1),
+                    uiSyncInfo = AirPlayUiSyncInfo(mapOf("schemaVersion" to 1)),
                 ),
             ),
         )
@@ -444,12 +446,12 @@ class AirPlayInfoPlistTest {
     @Test
     fun vehicleStateProtocolArrayAndMappingSurviveBplistRoundTrip() {
         val pluginConfigs = listOf(
-            linkedMapOf<String, Any?>("pluginName" to "climate"),
-            linkedMapOf<String, Any?>("pluginName" to "media"),
+            linkedMapOf<String, Any?>("pluginID" to 7L, "pluginName" to "climate"),
+            linkedMapOf<String, Any?>("pluginID" to 42L, "pluginName" to "media"),
         )
-        val pluginMapping = linkedMapOf<Long, Any?>(
-            7L to "climate",
-            42L to "media",
+        val pluginMapping = linkedMapOf<String, Long>(
+            "climate" to 7L,
+            "media" to 42L,
         )
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(
@@ -494,10 +496,9 @@ class AirPlayInfoPlistTest {
         assertEquals(2L, vehicle["pluginCount"])
         assertEquals("climate", (decodedPluginConfigs[0] as Map<*, *>)["pluginName"])
         assertEquals("media", (decodedPluginConfigs[1] as Map<*, *>)["pluginName"])
-        assertEquals(setOf(7L, 42L), decodedPluginMapping.keys)
-        assertTrue(decodedPluginMapping.keys.all { it is Long })
-        assertEquals("climate", decodedPluginMapping[7L])
-        assertEquals("media", decodedPluginMapping[42L])
+        assertEquals(setOf("climate", "media"), decodedPluginMapping.keys)
+        assertEquals(7L, decodedPluginMapping["climate"])
+        assertEquals(42L, decodedPluginMapping["media"])
     }
 
     private fun runtime(

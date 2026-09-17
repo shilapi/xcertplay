@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.airplay.rcs.caf.CafPluginRegistration
+import com.shilapi.xcertplay.airplay.rcs.caf.CafPluginRegistry
+
 /** Display insets in pixels, used for CarPlay viewArea and safeArea declarations. */
 data class AirPlayInsets(
     val top: Int = 0,
@@ -36,14 +39,69 @@ data class AirPlayIcon(
  * - [pluginConfigs] is encoded as an NSArray on the AirPlay wire.
  * - [pluginMapping] is encoded as an NSDictionary on the AirPlay wire.
  *
- * Their element/value schemas remain OEM and protocol-version specific. The transport layer never
- * invents vehicle-specific IDs or characteristic definitions.
+ * CarKit requires every `pluginConfigs` element to be an NSDictionary containing an NSNumber
+ * `pluginID`. CarAccessoryFramework reads `pluginMapping` as plugin-name -> NSNumber pluginID.
+ * Other element and mapping fields remain OEM/protocol-specific and are preserved verbatim.
  */
 data class AirPlayVehicleStateProtocolInfo(
     val protocolVersion: String = "1.0",
-    val pluginConfigs: List<Any?>,
-    val pluginMapping: Map<Long, Any?> = emptyMap(),
-)
+    val pluginConfigs: List<Map<String, Any?>>,
+    val pluginMapping: Map<String, Long> = emptyMap(),
+) {
+    companion object {
+        /**
+         * Builds the `/info` sidecar from explicitly supplied CAF registrations.
+         *
+         * A registration supplies the plugin ID and may supply additional wire fields through
+         * `CafPluginRegistration.pluginConfig`. No OEM values are synthesized. When no registration
+         * is supplied this returns null and the feature stays disabled.
+         */
+        fun from(
+            registrations: Collection<CafPluginRegistration>,
+            pluginMapping: Map<String, Long> = emptyMap(),
+        ): AirPlayVehicleStateProtocolInfo? {
+            if (registrations.isEmpty()) return null
+            val pluginConfigs = registrations.map { registration ->
+                registration.wirePluginConfig()
+            }
+            val effectiveMapping = LinkedHashMap(pluginMapping)
+            registrations.forEach { registration ->
+                val name = registration.pluginName?.trim().orEmpty()
+                if (name.isEmpty()) return@forEach
+                val existing = effectiveMapping[name]
+                if (existing != null && existing != registration.pluginId) {
+                    throw AirPlayConfigurationException(
+                        "vehicleStateProtocolInfo.pluginMapping '$name' maps to multiple plugin IDs",
+                    )
+                }
+                effectiveMapping[name] = registration.pluginId
+            }
+            return AirPlayVehicleStateProtocolInfo(
+                pluginConfigs = pluginConfigs,
+                pluginMapping = effectiveMapping,
+            )
+        }
+
+        fun fromRegistry(
+            registry: CafPluginRegistry,
+            pluginMapping: Map<String, Long> = emptyMap(),
+        ): AirPlayVehicleStateProtocolInfo? = from(
+            registrations = registry.allRegistrations(),
+            pluginMapping = pluginMapping,
+        )
+    }
+}
+
+/**
+ * `uiSyncInfo` is required when `uiSync` is enabled, but the firmware only checks that the
+ * top-level key exists and is an NSDictionary. No child key is read by AirPlaySender. Extra fields
+ * are retained for forward compatibility and OEM extensions.
+ */
+data class AirPlayUiSyncInfo(
+    val values: Map<String, Any?> = emptyMap(),
+) {
+    fun toWireMap(): Map<String, Any?> = LinkedHashMap(values)
+}
 
 /**
  * CarPlay Ultra capabilities for one handshake.
@@ -61,7 +119,7 @@ data class AirPlayVehicleStateProtocolInfo(
 data class AirPlayUltraConfig(
     val cluster: AirPlayDisplayConfig,
     val vehicleStateProtocolInfo: AirPlayVehicleStateProtocolInfo? = null,
-    val uiSyncInfo: Map<String, Any?>? = null,
+    val uiSyncInfo: AirPlayUiSyncInfo? = null,
     val fileTransferInfo: Map<String, Any?>? = null,
     val logTransferInfo: Map<String, Any?>? = null,
     val mainBufferedInfo: Map<String, Any?>? = null,

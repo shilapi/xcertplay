@@ -46,7 +46,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayDisplaySettings
-import com.shilapi.xcertplay.airplay.AirPlayFeature
 import com.shilapi.xcertplay.airplay.AirPlayPhysicalSizeBasis
 import com.shilapi.xcertplay.airplay.AirPlayPhysicalSizeMm
 import com.shilapi.xcertplay.airplay.CarPlayDisplayScale
@@ -56,14 +55,11 @@ import com.shilapi.xcertplay.airplay.AirPlayIcon
 import com.shilapi.xcertplay.airplay.AirPlaySafeArea
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
-import com.shilapi.xcertplay.airplay.AirPlayUltraConfig
+import com.shilapi.xcertplay.airplay.AirPlayUltraProvisioning
 import com.shilapi.xcertplay.airplay.AirPlayUltraRuntime
+import com.shilapi.xcertplay.airplay.CarPlayUltraFallbackProvisioning
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
 import com.shilapi.xcertplay.airplay.SafeAreaRect
-import com.shilapi.xcertplay.airplay.rcs.caf.CafConfigTreeDecoderFactory
-import com.shilapi.xcertplay.airplay.rcs.caf.CafPluginRegistry
-import com.shilapi.xcertplay.airplay.rcs.caf.CafProtocolSession
-import com.shilapi.xcertplay.airplay.rcs.caf.ProtocolCafConfigTreeDecoderFactory
 import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
@@ -2655,6 +2651,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun createAirPlayConfig(
         size: DisplaySize,
+        ultraProvisioning: AirPlayUltraProvisioning?,
         ultraRuntime: AirPlayUltraRuntime?,
     ): AirPlayConfig {
         val physical = resolvePhysicalSize(size)
@@ -2697,16 +2694,13 @@ class CarPlayHostActivity : ComponentActivity() {
             sourceVersion = "950.7.1",
             main = display,
             cluster = clusterDisplay,
-            ultra = clusterDisplay?.let {
-                AirPlayUltraConfig(
-                    cluster = it,
-                    readyFeatures = if (ultraEnabled) {
-                        setOf(AirPlayFeature.ALT_SCREEN)
-                    } else {
-                        emptySet()
-                    },
-                    runtime = ultraRuntime,
-                )
+            ultra = if (clusterDisplay != null &&
+                ultraProvisioning != null &&
+                ultraRuntime != null
+            ) {
+                ultraProvisioning.createConfig(clusterDisplay, ultraRuntime)
+            } else {
+                null
             },
             rightHandDrive = rightHandDrive,
             hevc = hevcEnabled,
@@ -2889,22 +2883,8 @@ class CarPlayHostActivity : ComponentActivity() {
             rcsHandlerFactory = ultraRuntime,
         )
 
-    /**
-     * Builds the production Ultra runtime seam. Vehicle-data plugins are intentionally supplied
-     * through [CafPluginRegistry.from]; an empty registry keeps CAF disabled instead of inventing
-     * OEM plugin configs or characteristic values.
-     */
-    private fun createUltraRuntime(): AirPlayUltraRuntime {
-        val plugins = CafPluginRegistry(emptyMap())
-        val decoderFactory: CafConfigTreeDecoderFactory =
-            ProtocolCafConfigTreeDecoderFactory.FIRMWARE_V1
-        return AirPlayUltraRuntime.builder()
-            .rcs(
-                clientTypes = CafPluginRegistry.DEFAULT_CLIENT_TYPES,
-                factory = CafProtocolSession.handlerFactory(plugins, decoderFactory),
-            )
-            .build()
-    }
+    private fun createUltraProvisioning(): AirPlayUltraProvisioning =
+        CarPlayUltraFallbackProvisioning.create()
 
     private fun createSessionListener(controllerGeneration: Int): AirPlaySessionListener =
         object : AirPlaySessionListener {
@@ -3016,8 +2996,9 @@ class CarPlayHostActivity : ComponentActivity() {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
         val controllerGeneration = restartGeneration
         val config = createRuntimeConfig()
-        val ultraRuntime = if (ultraEnabled) createUltraRuntime() else null
-        val airPlayConfig = createAirPlayConfig(size, ultraRuntime)
+        val ultraProvisioning = if (ultraEnabled) createUltraProvisioning() else null
+        val ultraRuntime = ultraProvisioning?.createRuntime()
+        val airPlayConfig = createAirPlayConfig(size, ultraProvisioning, ultraRuntime)
         val locationProvider: Iap2LocationProvider? =
             if (config.locationReportingEnabled) {
                 AndroidCarPlayLocationProvider(this)

@@ -200,6 +200,12 @@ class AirPlayFeatureNegotiationTest {
                             pluginConfigs = emptyList(),
                         ),
                         readyFeatures = setOf(AirPlayFeature.VEHICLE_STATE_PROTOCOL),
+                        runtime = runtime(
+                            rcsClientTypes = setOf(
+                                RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
+                                RcsClientTypes.CAR_PLAY_PROTOCOL_DATA_2,
+                            ),
+                        ),
                     ),
                 ),
                 eventPortAvailable = true,
@@ -224,7 +230,7 @@ class AirPlayFeatureNegotiationTest {
 
     private fun ultraConfig(
         vehicleStateProtocolInfo: AirPlayVehicleStateProtocolInfo? = null,
-        uiSyncInfo: Map<String, Any?>? = null,
+        uiSyncInfo: AirPlayUiSyncInfo? = null,
         fileTransferInfo: Map<String, Any?>? = null,
         logTransferInfo: Map<String, Any?>? = null,
         mainBufferedInfo: Map<String, Any?>? = null,
@@ -247,7 +253,7 @@ class AirPlayFeatureNegotiationTest {
 
     private fun sidecars(): Map<AirPlayFeature, Any?> = mapOf(
         AirPlayFeature.VEHICLE_STATE_PROTOCOL to vehicleStateProtocolInfo().asInfoResponse(),
-        AirPlayFeature.UI_SYNC to mapOf("schemaVersion" to 1),
+        AirPlayFeature.UI_SYNC to AirPlayUiSyncInfo(),
         AirPlayFeature.FILE_TRANSFER to mapOf("schemaVersion" to 1),
         AirPlayFeature.LOG_TRANSFER to mapOf("schemaVersion" to 1),
         AirPlayFeature.MAIN_BUFFERED to mapOf("schemaVersion" to 1),
@@ -271,8 +277,13 @@ class AirPlayFeatureNegotiationTest {
 
     private fun vehicleStateProtocolInfo(): AirPlayVehicleStateProtocolInfo =
         AirPlayVehicleStateProtocolInfo(
-            pluginConfigs = listOf(mapOf("accessories" to emptyList<Any?>())),
-            pluginMapping = mapOf(7L to "climate"),
+            pluginConfigs = listOf(
+                mapOf(
+                    "pluginID" to 7L,
+                    "accessories" to emptyList<Any?>(),
+                ),
+            ),
+            pluginMapping = mapOf("climate" to 7L),
         )
 }
 
