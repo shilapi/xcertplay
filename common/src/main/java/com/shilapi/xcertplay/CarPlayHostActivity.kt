@@ -55,6 +55,7 @@ import com.shilapi.xcertplay.airplay.AirPlayIcon
 import com.shilapi.xcertplay.airplay.AirPlaySafeArea
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
+import com.shilapi.xcertplay.airplay.AirPlayUltraConfig
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
 import com.shilapi.xcertplay.airplay.SafeAreaRect
 import com.shilapi.xcertplay.host.R
@@ -217,6 +218,8 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
     private var videoView: TextureView? = null
+    private var clusterContainer: FrameLayout? = null
+    private var clusterView: TextureView? = null
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
     private var mfiTargetGroup: RadioGroup? = null
@@ -246,13 +249,16 @@ class CarPlayHostActivity : ComponentActivity() {
     private var externalActivityInProgress = false
     private var sink: AndroidMediaSink? = null
     private var controller: CarPlayController? = null
-    private var currentSurface: Surface? = null
-    private var currentSurfaceTexture: SurfaceTexture? = null
+    private var mainSurface: Surface? = null
+    private var mainSurfaceTexture: SurfaceTexture? = null
+    private var clusterSurface: Surface? = null
+    private var clusterSurfaceTexture: SurfaceTexture? = null
     private var activeDisplaySize: DisplaySize? = null
     private var pendingDisplaySize: DisplaySize? = null
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
     private var hevcEnabled = true
     private var hevcSoftwareDecoderEnabled = false
+    private var ultraEnabled = false
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
     private var debugLogsEnabled = false
@@ -316,24 +322,33 @@ class CarPlayHostActivity : ComponentActivity() {
         applyDisplaySize(size)
     }
 
-    private val textureListener = object : TextureView.SurfaceTextureListener {
+    private val mainTextureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-            val existing = currentSurface
+            val existing = mainSurface
             val surface = if (
                 existing != null &&
-                currentSurfaceTexture === texture &&
+                mainSurfaceTexture === texture &&
                 existing.isValid
             ) {
                 existing
             } else {
                 Surface(texture).also {
-                    existing?.release()
-                    currentSurface = it
-                    currentSurfaceTexture = texture
+                    existing?.let { oldSurface ->
+                        sink?.clearSurface(SCREEN_TYPE_MAIN, oldSurface)
+                        oldSurface.release()
+                    }
+                    mainSurface = it
+                    mainSurfaceTexture = texture
                 }
             }
-            appendLog(if (existing === surface) "Texture surface reused" else "Texture surface created")
-            attachSurface(surface)
+            appendLog(
+                if (existing === surface) {
+                    "Main texture surface reused"
+                } else {
+                    "Main texture surface created"
+                },
+            )
+            attachSurface(SCREEN_TYPE_MAIN, surface)
             scheduleDisplaySize(width, height)
         }
 
@@ -342,15 +357,62 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
         override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-            if (currentSurfaceTexture !== texture) return true
-            currentSurface?.let { surface ->
+            if (mainSurfaceTexture !== texture) return true
+            mainSurface?.let { surface ->
                 sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
+                surface.release()
+            }
+            mainSurface = null
+            mainSurfaceTexture = null
+            appendLog("Main texture surface destroyed")
+            return true
+        }
+
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+    }
+
+    private val clusterTextureListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+            val existing = clusterSurface
+            val surface = if (
+                existing != null &&
+                clusterSurfaceTexture === texture &&
+                existing.isValid
+            ) {
+                existing
+            } else {
+                Surface(texture).also {
+                    existing?.let { oldSurface ->
+                        sink?.clearSurface(SCREEN_TYPE_ALT, oldSurface)
+                        oldSurface.release()
+                    }
+                    clusterSurface = it
+                    clusterSurfaceTexture = texture
+                }
+            }
+            appendLog(
+                if (existing === surface) {
+                    "Cluster texture surface reused"
+                } else {
+                    "Cluster texture surface created"
+                },
+            )
+            attachSurface(SCREEN_TYPE_ALT, surface)
+        }
+
+        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            appendLog("Cluster texture surface resized to ${width}x$height")
+        }
+
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+            if (clusterSurfaceTexture !== texture) return true
+            clusterSurface?.let { surface ->
                 sink?.clearSurface(SCREEN_TYPE_ALT, surface)
                 surface.release()
             }
-            currentSurface = null
-            currentSurfaceTexture = null
-            appendLog("Texture surface destroyed")
+            clusterSurface = null
+            clusterSurfaceTexture = null
+            appendLog("Cluster texture surface destroyed")
             return true
         }
 
@@ -406,6 +468,7 @@ class CarPlayHostActivity : ComponentActivity() {
         hevcSoftwareDecoderEnabled =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
+        ultraEnabled = AirPlayPersistence.loadCarPlayUltraEnabled(this)
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
@@ -439,6 +502,7 @@ class CarPlayHostActivity : ComponentActivity() {
         manualHotspotChannel = AirPlayPersistence.loadManualHotspotChannel(this)
         manualHotspotSecurity = AirPlayPersistence.loadManualHotspotSecurity(this)
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
+        updateUltraViewVisibility()
     }
 
     private fun requestStartupPrerequisites() {
@@ -554,13 +618,18 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
-        currentSurface?.let { surface ->
+        mainSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
+            surface.release()
+        }
+        clusterSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_ALT, surface)
             surface.release()
         }
-        currentSurface = null
-        currentSurfaceTexture = null
+        mainSurface = null
+        mainSurfaceTexture = null
+        clusterSurface = null
+        clusterSurfaceTexture = null
         sessionLog?.append("Activity destroyed")
         sessionLog?.close()
         sessionLog = null
@@ -577,7 +646,24 @@ class CarPlayHostActivity : ComponentActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
-            surfaceTextureListener = textureListener
+            surfaceTextureListener = mainTextureListener
+        }
+        val cluster = TextureView(this).apply {
+            isOpaque = false
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
+            surfaceTextureListener = clusterTextureListener
+        }
+        val clusterFrame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.BLACK)
+                setStroke(dp(1), CLUSTER_BORDER)
+            }
+            addView(cluster)
+            visibility = if (ultraEnabled) View.VISIBLE else View.GONE
         }
         val gestureLayer = View(this).apply {
             isClickable = true
@@ -640,6 +726,14 @@ class CarPlayHostActivity : ComponentActivity() {
 
         root.addView(video)
         root.addView(
+            clusterFrame,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                maxOf(1, resources.displayMetrics.heightPixels / 3),
+                Gravity.TOP,
+            ),
+        )
+        root.addView(
             gestureLayer,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -662,13 +756,25 @@ class CarPlayHostActivity : ComponentActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        root.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            if (view.height <= 0) return@addOnLayoutChangeListener
+            val params = clusterFrame.layoutParams as FrameLayout.LayoutParams
+            val clusterHeight = maxOf(1, view.height / 3)
+            if (params.height != clusterHeight) {
+                params.height = clusterHeight
+                clusterFrame.layoutParams = params
+            }
+        }
         videoView = video
+        clusterContainer = clusterFrame
+        clusterView = cluster
         gestureOverlay = gestureLayer
         settingsMenu = settings
         safeAreaEditor = editor
         statusView = log
         statusScrollView = logScroll
         stageStatusView = stageStatus
+        updateUltraViewVisibility()
         updateDebugOverlays()
         return root
     }
@@ -1021,6 +1127,27 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(16) },
         )
 
+        content.addView(
+            settingsSwitchRow(
+                label = "CarPlay Ultra",
+                checked = ultraEnabled,
+                description = "Enable the cluster display and Ultra handshake",
+            ) { checked ->
+                if (ultraEnabled == checked) return@settingsSwitchRow
+                ultraEnabled = checked
+                updateUltraViewVisibility()
+                appendLog(
+                    "CarPlay Ultra ${if (ultraEnabled) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(24) },
+        )
+
         val hevcRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1299,6 +1426,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.savePhysicalSizeBasis(this, physicalSizeBasis)
         AirPlayPersistence.saveHevcEnabled(this, hevcEnabled)
         AirPlayPersistence.saveHevcSoftwareDecoderEnabled(this, hevcSoftwareDecoderEnabled)
+        AirPlayPersistence.saveCarPlayUltraEnabled(this, ultraEnabled)
         AirPlayPersistence.saveManufacturer(this, manufacturer)
         AirPlayPersistence.saveModel(this, model)
         AirPlayPersistence.saveOemLabel(this, oemLabel)
@@ -2505,6 +2633,8 @@ class CarPlayHostActivity : ComponentActivity() {
             append("Driving side: ").append(if (rightHandDrive) "right" else "left").append('\n')
             append("Fullscreen: ").append(fullscreen).append('\n')
             append("Video transport: ").append(transport).append('\n')
+            append("CarPlay Ultra: ").append(if (ultraEnabled) "enabled" else "disabled")
+                .append('\n')
             append("Location reporting: ")
                 .append(if (locationReportingEnabled) "enabled" else "disabled")
                 .append('\n')
@@ -2540,12 +2670,25 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
             safeAreaDrawOutside = safeAreaDrawOutside,
         )
+        val clusterDisplay = if (ultraEnabled) {
+            AirPlayDisplayConfig(
+                widthPixels = size.width,
+                heightPixels = maxOf(1, size.height / 3),
+                widthPhysicalMm = physical.widthMm,
+                heightPhysicalMm = maxOf(1, physical.heightMm / 3),
+                fps = fps,
+            )
+        } else {
+            null
+        }
         return AirPlayConfig(
             deviceName = "xcertplay",
             deviceId = "02:00:00:00:00:02",
             btMac = "02:00:00:00:00:01",
             sourceVersion = "950.7.1",
             main = display,
+            cluster = clusterDisplay,
+            ultra = clusterDisplay?.let { AirPlayUltraConfig(cluster = it) },
             rightHandDrive = rightHandDrive,
             hevc = hevcEnabled,
             microphone = microphoneAvailable,
@@ -2809,7 +2952,7 @@ class CarPlayHostActivity : ComponentActivity() {
         snapshot.sink.setScreenStreamActiveChangedListener { type, active ->
             onScreenStreamStateChanged(restartGeneration, type, active)
         }
-        currentSurface?.let(::attachSurface)
+        attachCurrentSurfaces()
         val serviceReused = snapshot.controller.hasActiveAirPlayAttachment()
         appendLog(
             if (serviceReused) {
@@ -2849,6 +2992,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"} " +
                 "decoder=${if (airPlayConfig.hevc && hevcSoftwareDecoderEnabled) "software" else "hardware"} " +
                 "microphone=${airPlayConfig.microphone} " +
+                "ultra=${airPlayConfig.ultra != null} " +
+                "cluster=${airPlayConfig.cluster?.let { "${it.widthPixels}x${it.heightPixels}" } ?: "off"} " +
                 "location=${if (config.locationReportingEnabled) "enabled" else "disabled"} " +
                 "mfi=${mfiTargetLabel(config.mfiTarget)}",
         )
@@ -2869,7 +3014,7 @@ class CarPlayHostActivity : ComponentActivity() {
             controllerGeneration = controllerGeneration,
         )
         sink = renderer
-        currentSurface?.let(::attachSurface)
+        attachCurrentSurfaces()
         val media = createMediaEngine(renderer)
         val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
             AirPlayPersistence.savePairing(this, id, key)
@@ -3137,9 +3282,30 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    private fun attachSurface(surface: Surface) {
-        sink?.setSurface(SCREEN_TYPE_MAIN, surface)
-        sink?.setSurface(SCREEN_TYPE_ALT, surface)
+    private fun attachSurface(streamType: Int, surface: Surface) {
+        when (streamType) {
+            SCREEN_TYPE_MAIN -> sink?.setSurface(SCREEN_TYPE_MAIN, surface)
+            SCREEN_TYPE_ALT -> if (ultraEnabled) sink?.setSurface(SCREEN_TYPE_ALT, surface)
+        }
+    }
+
+    private fun attachCurrentSurfaces() {
+        mainSurface?.let { surface -> sink?.setSurface(SCREEN_TYPE_MAIN, surface) }
+        if (ultraEnabled) {
+            clusterSurface?.let { surface -> sink?.setSurface(SCREEN_TYPE_ALT, surface) }
+        }
+    }
+
+    private fun updateUltraViewVisibility() {
+        val container = clusterContainer ?: return
+        container.visibility = if (ultraEnabled) View.VISIBLE else View.GONE
+        clusterSurface?.let { surface ->
+            if (ultraEnabled) {
+                sink?.setSurface(SCREEN_TYPE_ALT, surface)
+            } else {
+                sink?.clearSurface(SCREEN_TYPE_ALT, surface)
+            }
+        }
     }
 
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
@@ -3373,6 +3539,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val MENU_BUTTON_TEXT = Color.rgb(8, 17, 11)
         val MENU_DANGER = Color.rgb(190, 45, 45)
         val NO_VIDEO_BACKGROUND = Color.rgb(0x16, 0x16, 0x18)
+        val CLUSTER_BORDER = Color.rgb(72, 84, 92)
     }
 
     private data class DisplaySize(val width: Int, val height: Int)

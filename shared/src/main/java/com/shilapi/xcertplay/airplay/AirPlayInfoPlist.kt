@@ -28,7 +28,9 @@ object AirPlayInfoPlist {
         val displays = arrayListOf<Any?>(
             displayEntry(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
         )
-        config.cluster?.let { displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID)) }
+        config.ultra?.cluster?.let {
+            displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
+        }
 
         val info = linkedMapOf<String, Any?>(
             "sourceVersion" to config.sourceVersion,
@@ -69,8 +71,21 @@ object AirPlayInfoPlist {
             }
         }
         if (config.hevc) info["hevcInfo"] = emptyMap<String, Any?>()
+        config.ultra?.vehicleStateProtocolInfo?.let {
+            info["vehicleStateProtocolInfo"] = vehicleStateProtocolInfo(it)
+        }
+        config.ultra?.uiSyncInfo?.let { info["uiSyncInfo"] = it }
         return info
     }
+
+    private fun vehicleStateProtocolInfo(
+        protocolInfo: AirPlayVehicleStateProtocolInfo,
+    ): Map<String, Any?> = linkedMapOf(
+        "protocolVersion" to protocolInfo.protocolVersion,
+        "pluginCount" to protocolInfo.pluginConfigs.size,
+        "pluginConfigs" to protocolInfo.pluginConfigs,
+        "pluginMapping" to protocolInfo.pluginMapping,
+    )
 
     private fun resource(resourceId: Int): Map<String, Any?> = linkedMapOf(
         "resourceID" to resourceId,

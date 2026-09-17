@@ -6,6 +6,7 @@ package com.shilapi.xcertplay.airplay
  * It covers the subset the stack emits and reads: dictionaries, arrays, ASCII and UTF-16
  * strings, raw data, non-negative integers, 32/64-bit reals, and booleans. Dictionary keys are
  * serialized in insertion order, matching the reference implementation this stack targets.
+ * Supported scalar keys retain their type; unsupported key objects keep the legacy string fallback.
  */
 object BplistCodec {
     private val magic = "bplist00".toByteArray(Charsets.US_ASCII)
@@ -61,7 +62,7 @@ object BplistCodec {
                 }
                 is Map<*, *> -> {
                     val entries = value.entries.toList()
-                    val keyRefs = entries.map { add(it.key.toString()) }.toIntArray()
+                    val keyRefs = entries.map { add(dictionaryKey(it.key)) }.toIntArray()
                     val valueRefs = entries.map { add(it.value) }.toIntArray()
                     nodes[index] = Container(marker(0xd, entries.size), keyRefs + valueRefs)
                 }
@@ -167,18 +168,33 @@ object BplistCodec {
             }
             0xd -> {
                 val count = readCount()
-                val dict = LinkedHashMap<String, Any?>(count)
+                val dict = LinkedHashMap<Any, Any?>(count)
                 for (i in 0 until count) {
                     val keyReference = readBigEndianLong(bytes, position + i.toLong() * refSize, refSize).toInt()
                     val valueReference =
                         readBigEndianLong(bytes, position + (count + i).toLong() * refSize, refSize).toInt()
-                    dict[readObject(bytes, offsets, refSize, keyReference).toString()] =
-                        readObject(bytes, offsets, refSize, valueReference)
+                    val key = readObject(bytes, offsets, refSize, keyReference)
+                        ?: throw IllegalArgumentException("bplist: dictionary key is null")
+                    dict[key] = readObject(bytes, offsets, refSize, valueReference)
                 }
                 dict
             }
             else -> throw IllegalArgumentException("bplist: unsupported object type 0x${type.toString(16)}")
         }
+    }
+
+    private fun dictionaryKey(value: Any?): Any = when (value) {
+        is String,
+        is Boolean,
+        is Byte,
+        is Short,
+        is Int,
+        is Long,
+        is java.math.BigInteger,
+        is Float,
+        is Double,
+        -> value
+        else -> value.toString()
     }
 
     private fun encodeString(value: String): ByteArray {

@@ -29,6 +29,31 @@ data class AirPlayIcon(
     val data: ByteArray,
 )
 
+/**
+ * Vehicle-state plugin metadata advertised in `/info`.
+ *
+ * The outer schema is firmware-confirmed. [pluginConfigs] and [pluginMapping] remain OEM data so
+ * the transport layer never invents vehicle-specific IDs or characteristic definitions.
+ */
+data class AirPlayVehicleStateProtocolInfo(
+    val protocolVersion: String = "1.0",
+    val pluginConfigs: Map<Long, Any?>,
+    val pluginMapping: Map<Long, Any?> = emptyMap(),
+)
+
+/**
+ * CarPlay Ultra capabilities for one handshake.
+ *
+ * A null [AirPlayConfig.ultra] disables every Ultra feature. The optional vehicle/UI-sync entries
+ * keep their corresponding features out of `enabledFeatures` until their implementation has the
+ * required sidecar data.
+ */
+data class AirPlayUltraConfig(
+    val cluster: AirPlayDisplayConfig,
+    val vehicleStateProtocolInfo: AirPlayVehicleStateProtocolInfo? = null,
+    val uiSyncInfo: Map<String, Any?>? = null,
+)
+
 /** Immutable accessory configuration consumed by the AirPlay session server. */
 data class AirPlayConfig(
     val deviceName: String,
@@ -37,6 +62,7 @@ data class AirPlayConfig(
     val sourceVersion: String,
     val main: AirPlayDisplayConfig,
     val cluster: AirPlayDisplayConfig? = null,
+    val ultra: AirPlayUltraConfig? = null,
     val rightHandDrive: Boolean = false,
     val port: Int = 7000,
     val entertainmentSampleRate: Int = 48000,

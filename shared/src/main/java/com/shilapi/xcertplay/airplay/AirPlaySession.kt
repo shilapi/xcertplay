@@ -438,19 +438,24 @@ class AirPlaySession(
         }
 
         val peerTimingPort = long(dict["timingPort"])?.toInt() ?: 0
+        val eventPort = openEvent()
         val response = linkedMapOf<String, Any?>(
             "timingPort" to openTiming(peerTimingPort),
-            "eventPort" to openEvent(),
+            "eventPort" to eventPort,
         )
         if (dict["keepAliveLowPower"] == true || dict["keepAliveLowPower"] == 1L) {
             response["keepAlivePort"] = openKeepAlive()
         }
-        val features = mutableListOf<String>()
-        if (config.hevc) features.add("hevc")
-        features.add("iAPChannel")
-        features.add("viewAreas")
-        if (config.cluster != null) features.add("altScreen")
-        response["enabledFeatures"] = features
+        val proposal = AirPlayFeatureNegotiation.propose(
+            config = config,
+            requestedFeatures = dict["features"],
+            eventPortAvailable = eventPort > 0,
+        )
+        response["enabledFeatures"] = proposal.enabledFeatures
+        debugLog(
+            "airplay SETUP feature proposal requested=${proposal.requestedFeatures} " +
+                "supported=${proposal.supportedFeatures} enabled=${proposal.enabledFeatures}",
+        )
         return RtspMessage.Response(
             headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
             body = BplistCodec.encode(response),

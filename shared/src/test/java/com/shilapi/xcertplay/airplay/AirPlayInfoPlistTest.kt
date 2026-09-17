@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.airplay
 
+import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -229,5 +230,120 @@ class AirPlayInfoPlistTest {
             .map { (it as Map<*, *>)["type"] }
             .toSet()
         assertEquals(setOf(100, 101, 102), types)
+    }
+
+    @Test
+    fun ultraDisabledDoesNotAdvertiseSecondDisplayOrUltraSidecars() {
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+            ),
+        )
+
+        assertEquals(1, (info["displays"] as List<*>).size)
+        assertFalse(info.containsKey("vehicleStateProtocolInfo"))
+        assertFalse(info.containsKey("uiSyncInfo"))
+    }
+
+    @Test
+    fun ultraAdvertisesAlternateDisplayAndProvidedSidecars() {
+        val pluginConfigs = mapOf(
+            7L to mapOf(
+                "accessories" to listOf(mapOf("iid" to 1, "type" to 0x0000000001000001L)),
+            ),
+        )
+        val pluginMapping = mapOf(7L to "climate")
+        val uiSyncInfo = mapOf("schemaVersion" to 1, "supportsDashboard" to true)
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                ultra = AirPlayUltraConfig(
+                    cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                    vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
+                        protocolVersion = "1.0",
+                        pluginConfigs = pluginConfigs,
+                        pluginMapping = pluginMapping,
+                    ),
+                    uiSyncInfo = uiSyncInfo,
+                ),
+            ),
+        )
+
+        val displays = info["displays"] as List<*>
+        assertEquals(2, displays.size)
+        assertEquals(111, (displays[1] as Map<*, *>)["type"])
+
+        val vehicle = info["vehicleStateProtocolInfo"] as Map<*, *>
+        assertEquals("1.0", vehicle["protocolVersion"])
+        assertEquals(1, vehicle["pluginCount"])
+        assertEquals(pluginConfigs, vehicle["pluginConfigs"])
+        assertEquals(pluginMapping, vehicle["pluginMapping"])
+        assertEquals(uiSyncInfo, info["uiSyncInfo"])
+    }
+
+    @Test
+    fun bplistDictionaryPreservesSupportedNumericKeyKinds() {
+        val encoded = BplistCodec.encode(
+            linkedMapOf<Any, Any?>(
+                "label" to "string",
+                1.toByte() to "byte",
+                2.toShort() to "short",
+                3 to "int",
+                4L to "long",
+                BigInteger.valueOf(5) to "bigInteger",
+            ),
+        )
+
+        val decoded = BplistCodec.decode(encoded) as Map<*, *>
+        assertEquals("string", decoded["label"])
+        assertEquals("byte", decoded[1L])
+        assertEquals("short", decoded[2L])
+        assertEquals("int", decoded[3L])
+        assertEquals("long", decoded[4L])
+        assertEquals("bigInteger", decoded[5L])
+        assertEquals(setOf(1L, 2L, 3L, 4L, 5L), decoded.keys.filterIsInstance<Number>().map { it.toLong() }.toSet())
+        assertTrue(decoded.keys.filterIsInstance<Number>().all { it is Long })
+    }
+
+    @Test
+    fun vehicleStateProtocolNumericPluginConfigKeysSurviveBplistRoundTrip() {
+        val pluginConfigs = linkedMapOf<Long, Any?>(
+            7L to linkedMapOf("pluginName" to "climate"),
+            42L to linkedMapOf("pluginName" to "media"),
+        )
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                ultra = AirPlayUltraConfig(
+                    cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                    vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
+                        pluginConfigs = pluginConfigs,
+                    ),
+                ),
+            ),
+        )
+
+        val decoded = BplistCodec.decode(BplistCodec.encode(info)) as Map<*, *>
+        val vehicle = decoded["vehicleStateProtocolInfo"] as Map<*, *>
+        val decodedPluginConfigs = vehicle["pluginConfigs"] as Map<*, *>
+
+        assertEquals(2L, vehicle["pluginCount"])
+        assertEquals(setOf(7L, 42L), decodedPluginConfigs.keys)
+        assertTrue(decodedPluginConfigs.keys.all { it is Long })
+        assertEquals("climate", (decodedPluginConfigs[7L] as Map<*, *>)["pluginName"])
+        assertEquals("media", (decodedPluginConfigs[42L] as Map<*, *>)["pluginName"])
     }
 }
