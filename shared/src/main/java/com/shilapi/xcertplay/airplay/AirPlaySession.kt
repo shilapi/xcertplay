@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
+import com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandlerFactory
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -43,6 +44,7 @@ interface AirPlayMediaHandler {
     fun onTeardown(session: AirPlaySession, type: Int) {}
     fun onSessionClosed(session: AirPlaySession) {}
     fun setIapTunnelHandler(handler: ((BlockingDuplexByteStream) -> Boolean)?) {}
+    fun setRcsDataStreamHandlerFactory(factory: RcsDataStreamHandlerFactory?) {}
     fun onSetupResponseSent(session: AirPlaySession) {}
 }
 
@@ -61,6 +63,10 @@ class AirPlaySession(
     private val listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
 ) : Closeable {
+    init {
+        media.setRcsDataStreamHandlerFactory(config.ultra?.runtime)
+    }
+
     internal val pairSetup = PairSetup(identity, pairings)
     internal val pairVerify = PairVerify(identity, pairings)
     internal var cipher: ControlCipher? = null
@@ -75,6 +81,7 @@ class AirPlaySession(
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
     private var pendingNightMode: Boolean? = null
+    @Volatile private var negotiatedFeatures: Set<AirPlayFeature> = emptySet()
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock()
@@ -96,6 +103,9 @@ class AirPlaySession(
     internal fun logDebug(message: String) = debugLog(message)
 
     internal fun logTrace(message: String) = trace(message)
+
+    internal fun isFeatureEnabled(feature: AirPlayFeature?): Boolean =
+        feature != null && feature in negotiatedFeatures
 
     fun start() {
         Thread(::runControl, "airplay-control").apply {
@@ -187,10 +197,7 @@ class AirPlaySession(
 
     fun sendIapMessage(data: ByteArray, timeoutMillis: Long = 0L): Boolean {
         require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
-        val command = linkedMapOf<String, Any?>(
-            "type" to "iAPSendMessage",
-            "params" to linkedMapOf("data" to data),
-        )
+        val command = AirPlayEventCommands.iapSendMessage(data)
         if (timeoutMillis == 0L) return sendCommand(command)
 
         val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
@@ -349,13 +356,21 @@ class AirPlaySession(
             }
             path.endsWith("/info") -> {
                 val info = AirPlayInfoPlist.build(config)
-                if (request.body.isNotEmpty()) {
-                    val requestInfo = try {
-                        BplistCodec.decode(request.body).toString()
-                    } catch (_: Exception) {
-                        "<unparseable ${request.body.size} bytes>"
-                    }
-                    debugLog("airplay /info request=$requestInfo")
+                val requestInfo = try {
+                    AirPlayInfoRequestFactory.decode(request.body)
+                } catch (error: Exception) {
+                    debugLog(
+                        "airplay /info request decode failed bytes=${request.body.size} " +
+                            "reason=${error.message ?: error.javaClass.simpleName}",
+                    )
+                    null
+                }
+                if (requestInfo != null) {
+                    debugLog(
+                        "airplay /info request altScreenURLs=${requestInfo.altScreenUrls} " +
+                            "uiContextURLs=${requestInfo.uiContextUrls ?: "absent"} " +
+                            "unrecognized=${requestInfo.unrecognized.keys.sorted()}",
+                    )
                 }
                 Log.i(
                     TAG,
@@ -451,6 +466,8 @@ class AirPlaySession(
             requestedFeatures = dict["features"],
             eventPortAvailable = eventPort > 0,
         )
+        AirPlayFeatureNegotiation.validateEnabledFeatures(config, proposal.enabledFeatureSet)
+        negotiatedFeatures = proposal.enabledFeatureSet
         response["enabledFeatures"] = proposal.enabledFeatures
         debugLog(
             "airplay SETUP feature proposal requested=${proposal.requestedFeatures} " +

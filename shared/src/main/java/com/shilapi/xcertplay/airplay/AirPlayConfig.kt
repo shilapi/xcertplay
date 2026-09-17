@@ -32,26 +32,43 @@ data class AirPlayIcon(
 /**
  * Vehicle-state plugin metadata advertised in `/info`.
  *
- * The outer schema is firmware-confirmed. [pluginConfigs] and [pluginMapping] remain OEM data so
- * the transport layer never invents vehicle-specific IDs or characteristic definitions.
+ * The outer schema is firmware-confirmed:
+ * - [pluginConfigs] is encoded as an NSArray on the AirPlay wire.
+ * - [pluginMapping] is encoded as an NSDictionary on the AirPlay wire.
+ *
+ * Their element/value schemas remain OEM and protocol-version specific. The transport layer never
+ * invents vehicle-specific IDs or characteristic definitions.
  */
 data class AirPlayVehicleStateProtocolInfo(
     val protocolVersion: String = "1.0",
-    val pluginConfigs: Map<Long, Any?>,
+    val pluginConfigs: List<Any?>,
     val pluginMapping: Map<Long, Any?> = emptyMap(),
 )
 
 /**
  * CarPlay Ultra capabilities for one handshake.
  *
- * A null [AirPlayConfig.ultra] disables every Ultra feature. The optional vehicle/UI-sync entries
- * keep their corresponding features out of `enabledFeatures` until their implementation has the
- * required sidecar data.
+ * A null [AirPlayConfig.ultra] disables every Ultra feature. Sidecars whose wire schema is not yet
+ * implemented have no default value: unless [readyFeatures] explicitly declares the implementation
+ * ready and the corresponding info is present, the feature stays out of `enabledFeatures`.
+ *
+ * [readyFeatures] is deliberately an enum set rather than a set of wire strings. A sidecar-backed
+ * feature listed there but missing its info is rejected while building the local response.
+ *
+ * [runtime] is the shared handler registry for RCS-backed features. A sidecar and a `readyFeatures`
+ * entry are insufficient when the corresponding RCS client type cannot be dispatched.
  */
 data class AirPlayUltraConfig(
     val cluster: AirPlayDisplayConfig,
     val vehicleStateProtocolInfo: AirPlayVehicleStateProtocolInfo? = null,
     val uiSyncInfo: Map<String, Any?>? = null,
+    val fileTransferInfo: Map<String, Any?>? = null,
+    val logTransferInfo: Map<String, Any?>? = null,
+    val mainBufferedInfo: Map<String, Any?>? = null,
+    val videoPlaybackInfo: Map<String, Any?>? = null,
+    val sessionManagementInfo: Map<String, Any?>? = null,
+    val readyFeatures: Set<AirPlayFeature> = emptySet(),
+    val runtime: AirPlayUltraRuntime? = null,
 )
 
 /** Immutable accessory configuration consumed by the AirPlay session server. */

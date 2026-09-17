@@ -1,9 +1,13 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandlerFactory
+import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientType
+import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -251,9 +255,42 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
+    fun altScreenUrlsAreParsedFromInfoRequestAndNeverEchoedInResponse() {
+        val request = AirPlayInfoRequestFactory.decode(
+            BplistCodec.encode(
+                linkedMapOf(
+                    "altScreenURLs" to listOf(
+                        "maps:/car/instrumentcluster/map",
+                        "maps:/car/instrumentcluster",
+                    ),
+                    "futureField" to 7,
+                ),
+            ),
+        )
+        val response = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+            ),
+        )
+
+        assertEquals(
+            listOf("maps:/car/instrumentcluster/map", "maps:/car/instrumentcluster"),
+            request!!.altScreenUrls,
+        )
+        assertNull(request.uiContextUrls)
+        assertEquals(setOf("futureField"), request.unrecognized.keys)
+        assertFalse(response.containsKey("altScreenURLs"))
+    }
+
+    @Test
     fun ultraAdvertisesAlternateDisplayAndProvidedSidecars() {
-        val pluginConfigs = mapOf(
-            7L to mapOf(
+        val pluginConfigs = listOf(
+            mapOf(
+                "pluginID" to 7L,
                 "accessories" to listOf(mapOf("iid" to 1, "type" to 0x0000000001000001L)),
             ),
         )
@@ -274,6 +311,27 @@ class AirPlayInfoPlistTest {
                         pluginMapping = pluginMapping,
                     ),
                     uiSyncInfo = uiSyncInfo,
+                    readyFeatures = setOf(
+                        AirPlayFeature.ALT_SCREEN,
+                        AirPlayFeature.VEHICLE_STATE_PROTOCOL,
+                        AirPlayFeature.UI_SYNC,
+                    ),
+                    runtime = runtime(
+                        sidecars = mapOf(
+                            AirPlayFeature.VEHICLE_STATE_PROTOCOL to mapOf(
+                                "protocolVersion" to "1.0",
+                                "pluginCount" to pluginConfigs.size,
+                                "pluginConfigs" to pluginConfigs,
+                                "pluginMapping" to pluginMapping,
+                            ),
+                            AirPlayFeature.UI_SYNC to uiSyncInfo,
+                        ),
+                        rcsClientTypes = setOf(
+                            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
+                            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA_2,
+                            RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL,
+                        ),
+                    ),
                 ),
             ),
         )
@@ -285,9 +343,78 @@ class AirPlayInfoPlistTest {
         val vehicle = info["vehicleStateProtocolInfo"] as Map<*, *>
         assertEquals("1.0", vehicle["protocolVersion"])
         assertEquals(1, vehicle["pluginCount"])
+        assertTrue(vehicle["pluginConfigs"] is List<*>)
         assertEquals(pluginConfigs, vehicle["pluginConfigs"])
         assertEquals(pluginMapping, vehicle["pluginMapping"])
         assertEquals(uiSyncInfo, info["uiSyncInfo"])
+    }
+
+    @Test
+    fun preparedSidecarFeaturesAreMaterializedInInfoResponse() {
+        val sidecars = linkedMapOf<AirPlayFeature, Map<String, Any?>>(
+            AirPlayFeature.FILE_TRANSFER to mapOf("schemaVersion" to 1),
+            AirPlayFeature.LOG_TRANSFER to mapOf("schemaVersion" to 2),
+            AirPlayFeature.MAIN_BUFFERED to mapOf("schemaVersion" to 3),
+            AirPlayFeature.VIDEO_PLAYBACK to mapOf("schemaVersion" to 4),
+            AirPlayFeature.SESSION_MANAGEMENT to mapOf("schemaVersion" to 5),
+        )
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                ultra = AirPlayUltraConfig(
+                    cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                    fileTransferInfo = sidecars.getValue(AirPlayFeature.FILE_TRANSFER),
+                    logTransferInfo = sidecars.getValue(AirPlayFeature.LOG_TRANSFER),
+                    mainBufferedInfo = sidecars.getValue(AirPlayFeature.MAIN_BUFFERED),
+                    videoPlaybackInfo = sidecars.getValue(AirPlayFeature.VIDEO_PLAYBACK),
+                    sessionManagementInfo = sidecars.getValue(AirPlayFeature.SESSION_MANAGEMENT),
+                    readyFeatures = sidecars.keys,
+                    runtime = runtime(
+                        runtimeFeatures = setOf(
+                            AirPlayFeature.MAIN_BUFFERED,
+                            AirPlayFeature.VIDEO_PLAYBACK,
+                            AirPlayFeature.SESSION_MANAGEMENT,
+                        ),
+                        rcsClientTypes = setOf(
+                            RcsClientTypes.CAR_PLAY_UPDATE_DATA,
+                            RcsClientTypes.CAR_PLAY_LOGGING_DATA,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        sidecars.forEach { (feature, value) ->
+            assertEquals(value, info[feature.infoResponseKey])
+        }
+    }
+
+    @Test
+    fun sidecarAndClusterAreNotAdvertisedWithoutReadyOptIn() {
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                ultra = AirPlayUltraConfig(
+                    cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                    vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
+                        pluginConfigs = listOf(mapOf("pluginID" to 7)),
+                    ),
+                    uiSyncInfo = mapOf("schemaVersion" to 1),
+                ),
+            ),
+        )
+
+        assertEquals(1, (info["displays"] as List<*>).size)
+        assertFalse(info.containsKey("vehicleStateProtocolInfo"))
+        assertFalse(info.containsKey("uiSyncInfo"))
     }
 
     @Test
@@ -315,10 +442,14 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
-    fun vehicleStateProtocolNumericPluginConfigKeysSurviveBplistRoundTrip() {
-        val pluginConfigs = linkedMapOf<Long, Any?>(
-            7L to linkedMapOf("pluginName" to "climate"),
-            42L to linkedMapOf("pluginName" to "media"),
+    fun vehicleStateProtocolArrayAndMappingSurviveBplistRoundTrip() {
+        val pluginConfigs = listOf(
+            linkedMapOf<String, Any?>("pluginName" to "climate"),
+            linkedMapOf<String, Any?>("pluginName" to "media"),
+        )
+        val pluginMapping = linkedMapOf<Long, Any?>(
+            7L to "climate",
+            42L to "media",
         )
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(
@@ -331,6 +462,25 @@ class AirPlayInfoPlistTest {
                     cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
                     vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
                         pluginConfigs = pluginConfigs,
+                        pluginMapping = pluginMapping,
+                    ),
+                    readyFeatures = setOf(
+                        AirPlayFeature.ALT_SCREEN,
+                        AirPlayFeature.VEHICLE_STATE_PROTOCOL,
+                    ),
+                    runtime = runtime(
+                        sidecars = mapOf(
+                            AirPlayFeature.VEHICLE_STATE_PROTOCOL to mapOf(
+                                "protocolVersion" to "1.0",
+                                "pluginCount" to pluginConfigs.size,
+                                "pluginConfigs" to pluginConfigs,
+                                "pluginMapping" to pluginMapping,
+                            ),
+                        ),
+                        rcsClientTypes = setOf(
+                            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA,
+                            RcsClientTypes.CAR_PLAY_PROTOCOL_DATA_2,
+                        ),
                     ),
                 ),
             ),
@@ -338,12 +488,29 @@ class AirPlayInfoPlistTest {
 
         val decoded = BplistCodec.decode(BplistCodec.encode(info)) as Map<*, *>
         val vehicle = decoded["vehicleStateProtocolInfo"] as Map<*, *>
-        val decodedPluginConfigs = vehicle["pluginConfigs"] as Map<*, *>
+        val decodedPluginConfigs = vehicle["pluginConfigs"] as List<*>
+        val decodedPluginMapping = vehicle["pluginMapping"] as Map<*, *>
 
         assertEquals(2L, vehicle["pluginCount"])
-        assertEquals(setOf(7L, 42L), decodedPluginConfigs.keys)
-        assertTrue(decodedPluginConfigs.keys.all { it is Long })
-        assertEquals("climate", (decodedPluginConfigs[7L] as Map<*, *>)["pluginName"])
-        assertEquals("media", (decodedPluginConfigs[42L] as Map<*, *>)["pluginName"])
+        assertEquals("climate", (decodedPluginConfigs[0] as Map<*, *>)["pluginName"])
+        assertEquals("media", (decodedPluginConfigs[1] as Map<*, *>)["pluginName"])
+        assertEquals(setOf(7L, 42L), decodedPluginMapping.keys)
+        assertTrue(decodedPluginMapping.keys.all { it is Long })
+        assertEquals("climate", decodedPluginMapping[7L])
+        assertEquals("media", decodedPluginMapping[42L])
+    }
+
+    private fun runtime(
+        sidecars: Map<AirPlayFeature, Any?> = emptyMap(),
+        runtimeFeatures: Set<AirPlayFeature> = emptySet(),
+        rcsClientTypes: Set<RcsClientType> = emptySet(),
+    ): AirPlayUltraRuntime {
+        val builder = AirPlayUltraRuntime.builder()
+        sidecars.forEach { (feature, value) -> builder.sidecar(feature, value) }
+        runtimeFeatures.forEach { feature -> builder.runtimeFeature(feature) }
+        if (rcsClientTypes.isNotEmpty()) {
+            builder.rcs(rcsClientTypes, RcsDataStreamHandlerFactory { null })
+        }
+        return builder.build()
     }
 }

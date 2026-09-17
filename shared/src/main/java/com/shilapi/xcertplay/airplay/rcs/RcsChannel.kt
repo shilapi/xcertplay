@@ -55,6 +55,9 @@ class RcsChannel private constructor(
     val isClosed: Boolean
         get() = closed
 
+    val isPeerEnded: Boolean
+        get() = peerEnded
+
     fun send(message: RcsMessage) {
         synchronized(sendLock) {
             ensureOpen()

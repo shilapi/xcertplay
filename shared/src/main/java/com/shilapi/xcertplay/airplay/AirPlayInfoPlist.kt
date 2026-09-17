@@ -25,11 +25,17 @@ object AirPlayInfoPlist {
     private const val CONSTRAINT_ANYTIME = 100
 
     fun build(config: AirPlayConfig): Map<String, Any?> {
+        val capabilities = AirPlayFeatureNegotiation.capabilities(
+            config = config,
+            eventPortAvailable = true,
+        )
         val displays = arrayListOf<Any?>(
             displayEntry(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
         )
-        config.ultra?.cluster?.let {
-            displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
+        if (AirPlayFeature.ALT_SCREEN in capabilities.supportedFeatureSet) {
+            config.ultra?.cluster?.let {
+                displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
+            }
         }
 
         val info = linkedMapOf<String, Any?>(
@@ -70,22 +76,20 @@ object AirPlayInfoPlist {
                 )
             }
         }
-        if (config.hevc) info["hevcInfo"] = emptyMap<String, Any?>()
-        config.ultra?.vehicleStateProtocolInfo?.let {
-            info["vehicleStateProtocolInfo"] = vehicleStateProtocolInfo(it)
+        capabilities.supportedFeatureSet
+            .filter { it.requiresInfoResponseSidecar }
+            .forEach { feature ->
+                val key = requireNotNull(feature.infoResponseKey)
+                info[key] = AirPlayFeatureNegotiation.resolveInfoSidecar(config, feature)
+                    ?: throw AirPlayConfigurationException(
+                        "AirPlay feature '${feature.wireName}' has no '${feature.infoResponseKey}'",
+                    )
+            }
+        if (AirPlayFeature.HEVC !in capabilities.supportedFeatureSet) {
+            info.remove("hevcInfo")
         }
-        config.ultra?.uiSyncInfo?.let { info["uiSyncInfo"] = it }
         return info
     }
-
-    private fun vehicleStateProtocolInfo(
-        protocolInfo: AirPlayVehicleStateProtocolInfo,
-    ): Map<String, Any?> = linkedMapOf(
-        "protocolVersion" to protocolInfo.protocolVersion,
-        "pluginCount" to protocolInfo.pluginConfigs.size,
-        "pluginConfigs" to protocolInfo.pluginConfigs,
-        "pluginMapping" to protocolInfo.pluginMapping,
-    )
 
     private fun resource(resourceId: Int): Map<String, Any?> = linkedMapOf(
         "resourceID" to resourceId,

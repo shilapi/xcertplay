@@ -49,6 +49,9 @@ class CafMessageReader internal constructor(
     fun valuesMap(): Map<Long, Any?> =
         CafNumbers.toLongKeyedMap(values(), "${command.wireName}.values")
 
+    fun configTree(decoder: CafConfigTreeDecoder): CafConfigTree =
+        decoder.decode(values())
+
     fun valuesList(): List<Any?> =
         values() as? List<Any?>
             ?: throw CafProtocolException("${command.wireName}.values is not an array")

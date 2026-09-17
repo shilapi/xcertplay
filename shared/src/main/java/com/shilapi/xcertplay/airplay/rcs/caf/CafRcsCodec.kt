@@ -85,13 +85,17 @@ object CafRcsCodec {
  * iAPChannel is an iAP2 tunnel, not a CAF channel. Its body remains byte-for-byte raw iAP2.
  */
 object IapChannelPayload {
-    fun asRcsMessage(iap2Frame: ByteArray): RcsMessage =
+    fun fromDevice(iap2Frame: ByteArray): RcsMessage =
         RcsMessage.comm(iap2Frame.copyOf())
 
-    fun from(message: RcsMessage): ByteArray {
+    fun toDevice(message: RcsMessage): ByteArray {
         if (message.messageType != com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.MESSAGE_TYPE_COMM) {
             throw CafProtocolException("iAPChannel payload must use comm messageType")
         }
         return message.body.copyOf()
     }
+
+    fun asRcsMessage(iap2Frame: ByteArray): RcsMessage = fromDevice(iap2Frame)
+
+    fun from(message: RcsMessage): ByteArray = toDevice(message)
 }

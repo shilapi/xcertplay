@@ -1,26 +1,21 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.airplay.rcs.RcsDataStream
+import com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandler
+import com.shilapi.xcertplay.airplay.rcs.RcsMessage
+import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
 import com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec
-import com.shilapi.xcertplay.airplay.rcs.transport.RcsFrameCodec
 import java.io.Closeable
-import java.io.InputStream
-import java.net.Inet4Address
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Receive-only iAP2-over-CarPlay DataStream tunnel (stream type 130).
+ * Receive-side iAP2-over-CarPlay type-130 tunnel.
  *
- * The TCP stream is NetSocketChaCha20Poly1305 framed, then carries APTransportPackage records.
- * iAP2 bodies (messageType "comm") are emitted verbatim for the wired iAP2 relay.
+ * The common RCS listener/framing implementation lives in [RcsDataStream]. This adapter only
+ * selects the iAP client type and exposes confirmed `comm` payloads as raw iAP2 bytes.
  */
 class IapTunnel(
-    private val readKey: ByteArray,
+    readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
 ) : Closeable {
     interface Listener {
@@ -30,151 +25,44 @@ class IapTunnel(
         fun onClosed(cause: Throwable?) {}
     }
 
-    private val closed = AtomicBoolean(false)
-    private val bindAddress =
-        if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
-    private val servers = mutableListOf<ServerSocket>()
-    private var socket: Socket? = null
-    private val threads = mutableListOf<Thread>()
-    private val peerConnected = CountDownLatch(1)
-    @Volatile private var listener: Listener = object : Listener {}
+    private val stream = RcsDataStream.open(
+        clientType = RcsClientTypes.IAP_CHANNEL,
+        readKey = readKey,
+        writeKey = readKey,
+        bindAddress = bindAddress,
+    )
 
-    fun listen(listener: Listener): Int {
-        this.listener = listener
-        val bound = bindAny()
-        servers += bound
-        listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localSocketAddress}")
-        val secondaryAddress = if (bindAddress is java.net.Inet6Address) {
-            InetAddress.getByName("0.0.0.0")
-        } else {
-            InetAddress.getByName("::")
-        }
-        val secondary = ServerSocket()
-        runCatching {
-            secondary.apply {
-                reuseAddress = true
-                bind(InetSocketAddress(secondaryAddress, bound.localPort))
-            }
-        }.onSuccess { secondary ->
-            servers += secondary
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener bound=" +
-                    "${secondary.localSocketAddress}",
-            )
-        }.onFailure { error ->
-            safeClose(secondary)
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener failed address=" +
-                    "$secondaryAddress port=${bound.localPort}: ${error.message}",
-            )
-        }
-        servers.forEach { server ->
-            threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
-                isDaemon = true
-                start()
-            }
-        }
-        return bound.localPort
-    }
+    fun listen(listener: Listener): Int =
+        stream.listen(
+            object : RcsDataStreamHandler {
+                override fun onStreamOpened(stream: RcsDataStream) {
+                    listener.onOpen(null)
+                }
 
-    private fun bindAny(): ServerSocket =
-        ServerSocket().apply {
-            reuseAddress = true
-            bind(InetSocketAddress(bindAddress, 0))
+                override fun onMessage(stream: RcsDataStream, message: RcsMessage) {
+                    if (message.messageType != ApTransportPackageCodec.MESSAGE_TYPE_COMM) return
+                    listener.onDebug(
+                        "AirPlay iAP tunnel package type=comm body=${message.body.size}",
+                    )
+                    listener.onIap(message.body)
+                }
+
+                override fun onStreamClosed(stream: RcsDataStream, cause: Throwable?) {
+                    if (cause == null) {
+                        listener.onDebug("AirPlay iAP tunnel peer EOF")
+                    } else {
+                        listener.onClosed(cause)
+                    }
+                }
+            },
+        ).also { port ->
+            listener.onDebug("AirPlay iAP tunnel listening port=$port")
         }
+
+    fun awaitPeerConnection(timeoutMillis: Long): Boolean =
+        stream.awaitPeerConnection(timeoutMillis)
 
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        safeClose(socket)
-        servers.toList().forEach(::safeClose)
-        servers.clear()
-        threads.toList().forEach(Thread::interrupt)
-        threads.clear()
-        peerConnected.countDown()
-    }
-
-    /** Waits until the iPhone has connected to the advertised dataPort. */
-    fun awaitPeerConnection(timeoutMillis: Long): Boolean {
-        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
-        return try {
-            peerConnected.await(timeoutMillis, TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            false
-        }
-    }
-
-    private fun accept(bound: ServerSocket) {
-        listener.onDebug(
-            "AirPlay iAP tunnel accepting local=${bound.localSocketAddress}",
-        )
-        while (!closed.get()) {
-            val accepted = try {
-                bound.accept()
-            } catch (error: Exception) {
-                if (!closed.get()) listener.onClosed(error)
-                return
-            }
-            if (closed.get()) {
-                safeClose(accepted)
-                return
-            }
-            accepted.setSoLinger(true, 0)
-            socket = accepted
-            peerConnected.countDown()
-            listener.onOpen(accepted.remoteSocketAddress?.toString())
-            run(accepted)
-        }
-    }
-
-    private fun run(sock: Socket) {
-        var ciphertext = ByteArray(0)
-        var plaintext = ByteArray(0)
-        var failure: Throwable? = null
-        var announcedData = false
-        try {
-            val frameCodec = RcsFrameCodec.reader(readKey)
-            val input = sock.getInputStream()
-            val buffer = ByteArray(READ_CHUNK_BYTES)
-            while (!closed.get()) {
-                val read = input.read(buffer)
-                if (read < 0) {
-                    listener.onDebug("AirPlay iAP tunnel peer EOF")
-                    break
-                }
-                if (!announcedData) {
-                    announcedData = true
-                    listener.onDebug("AirPlay iAP tunnel received data")
-                }
-                ciphertext += buffer.copyOf(read)
-                val decrypted = frameCodec.decrypt(ciphertext)
-                plaintext += decrypted.data
-                ciphertext = decrypted.rest
-                plaintext = parsePackages(plaintext)
-            }
-        } catch (error: Exception) {
-            failure = error
-        } finally {
-            if (socket === sock) socket = null
-            safeClose(sock)
-            if (!closed.get() && failure != null) listener.onClosed(failure)
-        }
-    }
-
-    private fun parsePackages(buffer: ByteArray): ByteArray {
-        val decoded = ApTransportPackageCodec.decodeAvailable(buffer)
-        decoded.packages.forEach { packageValue ->
-            if (packageValue.messageType == ApTransportPackageCodec.MESSAGE_TYPE_COMM) {
-                listener.onDebug(
-                    "AirPlay iAP tunnel package type=comm body=${packageValue.body.size}",
-                )
-                listener.onIap(packageValue.body)
-            }
-        }
-        return decoded.remainder
-    }
-
-    private companion object {
-        const val READ_CHUNK_BYTES = 16 * 1024
+        stream.close()
     }
 }

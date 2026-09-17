@@ -106,4 +106,161 @@ class CafRcsCodecTest {
         }
         assertTrue(failure.message!!.contains("requires errors"))
     }
+
+    @Test
+    fun unknownCommandAndPluginAreRejected() {
+        val inner = OpackCodec.encode(
+            linkedMapOf(
+                "command" to "unknownCommand",
+                "transactionID" to 1L,
+            ),
+        )
+        val outer = OpackCodec.encode(
+            linkedMapOf(
+                "pluginID" to 7L,
+                "pluginData" to inner,
+            ),
+        )
+        val body = BplistCodec.encode(
+            linkedMapOf(
+                "params" to linkedMapOf(
+                    "data" to outer,
+                ),
+            ),
+        )
+
+        assertThrows(CafProtocolException::class.java) {
+            CarAccessoryMessages.reader(body)
+        }
+        assertThrows(CafProtocolException::class.java) {
+            CafPluginRegistry(emptyMap()).require(7L)
+        }
+    }
+
+    @Test
+    fun configTreeFactoryDecodesConfirmedProtocolOneSchema() {
+        val decoder = ProtocolCafConfigTreeDecoderFactory.FIRMWARE_V1.create(
+            protocolVersion = "1.0",
+            pluginConfig = mapOf("pluginID" to 7),
+        )
+        val decoded = decoder.decode(
+            linkedMapOf(
+                "accessories" to listOf(
+                    linkedMapOf(
+                        "type" to CLIMATE_ACCESSORY,
+                        "iid" to 1L,
+                        "version" to "1.0",
+                        "services" to listOf(
+                            linkedMapOf(
+                                "type" to TEMPERATURE_SERVICE,
+                                "iid" to 2L,
+                                "characteristics" to listOf(
+                                    linkedMapOf(
+                                        "type" to TARGET_TEMPERATURE,
+                                        "iid" to 3L,
+                                        "format" to 9L,
+                                        "writable" to true,
+                                        "initialValue" to 22.5,
+                                        "priority" to 1L,
+                                        "oemExtension" to "kept",
+                                    ),
+                                ),
+                                "controls" to listOf(
+                                    linkedMapOf(
+                                        "type" to 0x000000000F000032L,
+                                        "iid" to 4L,
+                                        "sender" to "device",
+                                        "hasResponse" to true,
+                                        "requestParameters" to listOf(
+                                            linkedMapOf(
+                                                "name" to "reason",
+                                                "format" to 10L,
+                                                "supportsInvalid" to false,
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                "oemRootExtension" to 7,
+            ),
+        )
+
+        val accessory = decoded.accessories.single()
+        assertEquals(CLIMATE_ACCESSORY, accessory.type.value)
+        assertEquals("Climate", CafTypeCatalog.find(CafTypeKind.ACCESSORY, accessory.type)?.name)
+        val characteristic = accessory.services.single().characteristics.single()
+        assertEquals(CafCharacteristicFormat.FLOAT, characteristic.format)
+        assertEquals(
+            CafFormatValue.Floating(22.5),
+            characteristic.initialValue,
+        )
+        assertEquals("kept", characteristic.extensions["oemExtension"])
+        val control = accessory.services.single().controls.single()
+        assertEquals(CafControlSender.DEVICE, control.sender)
+        assertTrue(control.hasResponse)
+        assertEquals(CafCharacteristicFormat.STRING, control.requestParameters.single().format)
+        assertEquals(7, decoded.extensions["oemRootExtension"])
+    }
+
+    @Test
+    fun configTreeFactoryRejectsUnknownVersionAndMalformedValues() {
+        assertThrows(CafProtocolException::class.java) {
+            ProtocolCafConfigTreeDecoderFactory.FIRMWARE_V1.create(
+                protocolVersion = "2.0",
+                pluginConfig = null,
+            )
+        }
+        assertThrows(CafProtocolException::class.java) {
+            CafConfigTree.decode(
+                linkedMapOf(
+                    "accessories" to listOf(
+                        linkedMapOf(
+                            "type" to 1L,
+                            "iid" to 1L,
+                            "version" to "1.0",
+                            "services" to listOf(
+                                linkedMapOf(
+                                    "type" to 2L,
+                                    "iid" to 2L,
+                                    "characteristics" to listOf(
+                                        linkedMapOf(
+                                            "type" to 3L,
+                                            "iid" to 3L,
+                                            "format" to 99L,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun directionalFactoriesKeepRequestResponseAndNotificationSeparate() {
+        val request = CafDirectionalMessage.from(
+            CarAccessoryMessages.readRequest(1, 2, listOf(3)),
+        )
+        val response = CafDirectionalMessage.from(
+            CarAccessoryMessages.readResponse(1, 2, emptyMap(), emptyMap()),
+        )
+        val notification = CafDirectionalMessage.from(
+            CarAccessoryMessages.updateNotify(1, mapOf(3L to 4)),
+        )
+
+        assertTrue(request is CafDirectionalMessage.Request)
+        assertTrue(response is CafDirectionalMessage.Response)
+        assertTrue(notification is CafDirectionalMessage.Notification)
+    }
+
+    private companion object {
+        const val CLIMATE_ACCESSORY = 0x0000000001000001L
+        const val TEMPERATURE_SERVICE = 0x0000000011000002L
+        const val TARGET_TEMPERATURE = 0x0000000031000017L
+    }
 }
