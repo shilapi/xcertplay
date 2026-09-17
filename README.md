@@ -36,7 +36,9 @@ controller, and supports both wired and wireless CarPlay connections.
 
 It works 👍. It has been tested on car head units and phones. If you encounter
 an incompatible car head unit, please open an issue and attach your log from
-`/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`.
+`/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`. Saved logs include every
+AirPlay, RCS, CAF, iAP2, USBMUX, and Lockdown control interaction with formatted details and wire
+payloads; screen and audio media payloads are not written.
 
 Adapter board: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 

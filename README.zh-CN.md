@@ -28,7 +28,7 @@
 
 ## 当前进度
 
-他运转👍，已在车机/手机平台测试，如果出现部分车机不适配的情况欢迎 issue （并附上你的 log ，位于 `/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`）
+他运转👍，已在车机/手机平台测试，如果出现部分车机不适配的情况欢迎 issue （并附上你的 log ，位于 `/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`）。保存的 log 会包含 AirPlay、RCS、CAF、iAP2、USBMUX 和 Lockdown 等控制协议的每次交互摘要及详细 payload；屏幕和音频媒体流本身不会写入。
 
 转接板：[CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 

@@ -67,8 +67,15 @@ class RcsChannel private constructor(
                     write(encoded)
                     flush()
                 }
-                trace("RCS send type=0x${message.messageType.toString(16)} bytes=${message.body.size}")
+                trace(
+                    "RCS TX type=0x${message.messageType.toString(16)} bytes=${message.body.size} " +
+                        "bodyHex=${message.body.toHex()}",
+                )
             } catch (failure: Throwable) {
+                trace(
+                    "RCS TX FAILED type=0x${message.messageType.toString(16)} " +
+                        "bytes=${message.body.size}: ${failure.message ?: failure.javaClass.simpleName}",
+                )
                 close()
                 throw failure
             }
@@ -150,8 +157,8 @@ class RcsChannel private constructor(
     private fun takePending(): RcsMessage? {
         val packageValue = pendingPackages.pollFirst() ?: return null
         trace(
-            "RCS receive type=0x${packageValue.messageType.toString(16)}" +
-                " bytes=${packageValue.body.size}",
+            "RCS RX type=0x${packageValue.messageType.toString(16)}" +
+                " bytes=${packageValue.body.size} bodyHex=${packageValue.body.toHex()}",
         )
         return RcsMessage(packageValue.messageType, packageValue.body)
     }
@@ -225,6 +232,10 @@ class RcsChannel private constructor(
             )
     }
 }
+
+private fun ByteArray.toHex(): String =
+    if (isEmpty()) "<empty>"
+    else joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
 /**
  * Receive-side factory returned by [RcsChannel.listen].

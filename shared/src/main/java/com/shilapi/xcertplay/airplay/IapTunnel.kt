@@ -42,7 +42,8 @@ class IapTunnel(
                 override fun onMessage(stream: RcsDataStream, message: RcsMessage) {
                     if (message.messageType != ApTransportPackageCodec.MESSAGE_TYPE_COMM) return
                     listener.onDebug(
-                        "AirPlay iAP tunnel package type=comm body=${message.body.size}",
+                        "AirPlay iAP tunnel RX package=comm body=${message.body.size}B " +
+                            "bodyHex=${ProtocolTraceFormatter.hex(message.body)}",
                     )
                     listener.onIap(message.body)
                 }

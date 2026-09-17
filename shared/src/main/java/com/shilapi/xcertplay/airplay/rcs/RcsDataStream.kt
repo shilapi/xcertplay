@@ -157,6 +157,10 @@ class RcsDataStream private constructor(
         active.send(message)
     }
 
+    internal fun traceProtocol(message: String) {
+        trace(message)
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         synchronized(stateLock) {
@@ -258,7 +262,7 @@ class RcsDataStream private constructor(
     }
 
     private fun trace(message: String) {
-        runCatching { onTrace(message) }
+        runCatching { onTrace("RCS [${clientType.name}] $message") }
     }
 
     companion object {

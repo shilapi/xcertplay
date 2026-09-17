@@ -424,6 +424,7 @@ class CarPlayController(
                 val client = RemoteMfiAuthenticationClient(
                     serverAddress = checkNotNull(config.remoteMfiServer),
                     token = config.remoteMfiToken,
+                    onTrace = { message -> debugLog("TRACE MFI $message") },
                 )
                 client.reset()
                 val protocolMajor = client.protocolMajor()
@@ -1200,11 +1201,17 @@ class CarPlayController(
         var ncmOwnedLocally = true
         try {
             if (closed) return
-            val mux = Iap2UsbMuxHost.open(usbSession)
+            val mux = Iap2UsbMuxHost.open(
+                usbSession,
+                onTrace = { message -> debugLog("TRACE USBMUX $message") },
+            )
             this.mux = mux
             debugLog("wired USBMUX host opened")
             onStatus(CarPlayStatus.Pairing)
-            val pairingClient = LockdownPairingClient(mux)
+            val pairingClient = LockdownPairingClient(
+                mux,
+                onTrace = { message -> debugLog("TRACE LOCKDOWN $message") },
+            )
             val savedPairRecord = loadPairRecord()
             var pairRecord = savedPairRecord ?: pairNewRecord(pairingClient)
             debugLog(
@@ -1215,7 +1222,10 @@ class CarPlayController(
                 },
             )
             onStatus(CarPlayStatus.ConnectingControl)
-            val carKitClient = LockdownCarKitClient(mux)
+            val carKitClient = LockdownCarKitClient(
+                mux,
+                onTrace = { message -> debugLog("TRACE LOCKDOWN $message") },
+            )
             val carkit = try {
                 carKitClient.open(pairRecord, config.label)
             } catch (error: Throwable) {

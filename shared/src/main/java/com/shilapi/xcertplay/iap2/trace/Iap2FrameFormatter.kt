@@ -50,6 +50,7 @@ object Iap2FrameFormatter {
             )
         }
         lines += "  raw-body=${hexPreview(frame.payload)}"
+        lines += "  frameHex=${hex(encoded)}"
 
         val endpointText = endpoint?.let { " ${it.name}" }.orEmpty()
         return buildString {
@@ -204,6 +205,15 @@ object Iap2FrameFormatter {
         }
         return if (payload.size <= MAX_HEX_BYTES) shown else "$shown ... (+${payload.size - MAX_HEX_BYTES}B)"
     }
+
+    private fun hex(payload: ByteArray): String =
+        if (payload.isEmpty()) {
+            "<empty>"
+        } else {
+            payload.joinToString(separator = "") { byte ->
+                "%02x".format(byte.toInt() and 0xff)
+            }
+        }
 
     private fun u8(value: Byte): Int = value.toInt() and 0xff
 

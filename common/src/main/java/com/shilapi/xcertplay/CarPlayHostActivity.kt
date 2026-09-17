@@ -2930,8 +2930,10 @@ class CarPlayHostActivity : ComponentActivity() {
                     if (menuOpen || controllerGeneration != restartGeneration) {
                         return@runOnUiThread
                     }
-                    if (message.startsWith(PROTOCOL_TRACE_PREFIX)) {
-                        appendFileLog(message)
+                    if (message.startsWith(PROTOCOL_TRACE_PREFIX) ||
+                        message.startsWith(PROTOCOL_IAP2_TRACE_PREFIX)
+                    ) {
+                        appendProtocolLog(message)
                     } else {
                         appendLog(message)
                     }
@@ -3439,14 +3441,33 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun appendLog(message: String) {
         val now = System.currentTimeMillis()
-        val line = formattedLogLine(message, now)
-        logLines.addLast(LogEntry(now, line))
-        sessionLog?.append(line)
-        refreshLogView(now)
+        appendLogEntry(message, message, now)
     }
 
-    private fun appendFileLog(message: String) {
-        sessionLog?.append(formattedLogLine(message, System.currentTimeMillis()))
+    private fun appendProtocolLog(message: String) {
+        val now = System.currentTimeMillis()
+        val detailed = if (message.startsWith(PROTOCOL_TRACE_PREFIX)) {
+            message
+        } else {
+            "$PROTOCOL_TRACE_PREFIX$message"
+        }
+        val firstLine = detailed.lineSequence().firstOrNull().orEmpty()
+        val summary = if (firstLine.length <= MAX_PROTOCOL_UI_LINE_CHARS) {
+            firstLine
+        } else {
+            firstLine.take(MAX_PROTOCOL_UI_LINE_CHARS) + "..."
+        }
+        appendLogEntry(summary, detailed, now)
+    }
+
+    private fun appendLogEntry(
+        uiMessage: String,
+        fileMessage: String,
+        nowMillis: Long,
+    ) {
+        logLines.addLast(LogEntry(nowMillis, formattedLogLine(uiMessage, nowMillis)))
+        sessionLog?.append(formattedLogLine(fileMessage, nowMillis))
+        refreshLogView(nowMillis)
     }
 
     private fun formattedLogLine(message: String, nowMillis: Long): String =
@@ -3469,6 +3490,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun refreshLogView(nowMillis: Long) {
         val cutoff = nowMillis - LOG_RETENTION_MILLIS
         while (logLines.firstOrNull()?.timestampMillis?.let { it <= cutoff } == true) {
+            logLines.removeFirst()
+        }
+        while (logLines.size > MAX_DISPLAY_LOG_LINES) {
             logLines.removeFirst()
         }
         statusView?.text = logLines.joinToString("\n") { it.text }
@@ -3549,6 +3573,9 @@ class CarPlayHostActivity : ComponentActivity() {
         const val AUDIO_CAPTURE_MARKER = "audio-capture.enabled"
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
         const val PROTOCOL_TRACE_PREFIX = "TRACE "
+        const val PROTOCOL_IAP2_TRACE_PREFIX = "IAP2 "
+        const val MAX_PROTOCOL_UI_LINE_CHARS = 480
+        const val MAX_DISPLAY_LOG_LINES = 2_000
         const val THREE_FINGER_COUNT = 3
         const val THREE_FINGER_SWIPE_DISTANCE_DP = 72
         const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 1.15f

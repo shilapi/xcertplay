@@ -14,6 +14,7 @@ import java.security.GeneralSecurityException
  */
 class LockdownPairingClient(
     private val host: Iap2UsbMuxHost,
+    private val onTrace: (String) -> Unit = {},
 ) {
     /**
      * Fetches the two pairing inputs, generates the local record, and sends plaintext Pair.
@@ -49,7 +50,7 @@ class LockdownPairingClient(
                 timeoutMillis = stepTimeoutMillis(deadline),
             )
             var pending = false
-            LockdownPlistChannel(connection).use { channel ->
+            LockdownPlistChannel(connection, onTrace = onTrace).use { channel ->
                 setUntrustedHostBuid(channel, label, systemBuid, deadline, isCancelled)
                 val record = pairRecord ?: generatePairRecord(
                     channel = channel,

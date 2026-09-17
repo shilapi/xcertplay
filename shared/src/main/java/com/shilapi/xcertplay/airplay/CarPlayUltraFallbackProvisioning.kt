@@ -141,7 +141,21 @@ private object CarPlayClusterControlFallbackFactory : RcsDataStreamHandlerFactor
 }
 
 private object CarPlayClusterControlFallbackHandler : RcsDataStreamHandler {
+    override fun onStreamOpened(stream: RcsDataStream) {
+        stream.traceProtocol("CarPlayClusterControl opened")
+    }
+
     override fun onMessage(stream: RcsDataStream, message: RcsMessage) {
-        // The firmware exposes only the opaque client type; no application frame is synthesized.
+        stream.traceProtocol(
+            "CarPlayClusterControl RX messageType=0x${message.messageType.toString(16)} " +
+                "body=${message.body.size}B bodyHex=${ProtocolTraceFormatter.hex(message.body)}",
+        )
+    }
+
+    override fun onStreamClosed(stream: RcsDataStream, cause: Throwable?) {
+        stream.traceProtocol(
+            "CarPlayClusterControl closed cause=" +
+                (cause?.message ?: cause?.javaClass?.simpleName ?: "none"),
+        )
     }
 }

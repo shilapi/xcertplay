@@ -14,6 +14,7 @@ import java.util.ArrayDeque
 class Iap2UsbMuxHost private constructor(
     private val pipe: Iap2UsbSession,
     private val readTimeoutMillis: Long,
+    private val onTrace: (String) -> Unit,
 ) : Closeable {
     private val stateLock = Any()
     private val writeLock = Any()
@@ -111,6 +112,7 @@ class Iap2UsbMuxHost private constructor(
         putU32(version, 0, PROTOCOL_VERSION)
         putU32(version, 4, VERSION_MESSAGE_BYTES)
         putU32(version, 8, USBMUX_VERSION)
+        trace("USBMUX TX VERSION frameHex=${version.toHex()}")
         pipe.write(version, HANDSHAKE_TIMEOUT_MILLIS.toInt())
         // The phone replies with the same proto=0, length=20, version=2 packet. Protocol 1 is not
         // a distinct "version reply" here; waiting for it discards the valid reply and times out.
@@ -141,9 +143,9 @@ class Iap2UsbMuxHost private constructor(
                         "length=${reply.length} version=${reply.word8}",
                 )
             }
-            Log.i("xcertplay-usb", "discarding stale usbmux TCP frame before version reply")
+            trace("discarding stale usbmux TCP frame before version reply")
         }
-        Log.i("xcertplay-usb", "usbmux version accepted: ${reply.word8}")
+        trace("usbmux version accepted: ${reply.word8}")
         sendFrame(PROTOCOL_SETUP, byteArrayOf(SETUP_VALUE.toByte()))
         readerThread = Thread(::readerLoop, "iap2-usbmux-reader").apply {
             isDaemon = true
@@ -165,10 +167,10 @@ class Iap2UsbMuxHost private constructor(
                     if (receiveBuffer.size >= length) {
                         // LIVI only trusts the length field on receive: iPhone replies do not
                         // carry the 0xFEEDFACE word in the header's fourth field.
-                        Log.i(
-                            "xcertplay-usb",
-                            "usbmux rx proto=${readU32(receiveBuffer, 0)} length=$length word8=0x" +
-                                readU32(receiveBuffer, 8).toUInt().toString(16),
+                        trace(
+                            "USBMUX RX proto=${readU32(receiveBuffer, 0)} length=$length word8=0x" +
+                                readU32(receiveBuffer, 8).toUInt().toString(16) +
+                                " frameHex=${receiveBuffer.copyOfRange(0, length).toHex()}",
                         )
                         val protocol = readU32(receiveBuffer, 0)
                         val word8 = readU32(receiveBuffer, 8)
@@ -201,9 +203,13 @@ class Iap2UsbMuxHost private constructor(
         putU16(frame, 12, sequenceAndAcknowledgement.first)
         putU16(frame, 14, sequenceAndAcknowledgement.second)
         payload.copyInto(frame, MUX_HEADER_BYTES)
+        trace(
+            "USBMUX TX proto=$protocol length=${frame.size} frameHex=${frame.toHex()}",
+        )
         try {
             pipe.write(frame, WRITE_TIMEOUT_MILLIS)
         } catch (error: IphoneUsbException) {
+            trace("USBMUX TX FAILED proto=$protocol length=${frame.size}: $error")
             fail(error)
             throw error
         }
@@ -225,6 +231,15 @@ class Iap2UsbMuxHost private constructor(
             fail(error)
         } catch (error: RuntimeException) {
             fail(IphoneUsbException.DeviceUnavailable("USBMUX reader failed", error))
+        }
+    }
+
+    private fun trace(message: String) {
+        Log.i("xcertplay-usb", message)
+        try {
+            onTrace(message)
+        } catch (_: Exception) {
+            // Logging must never change transport behavior.
         }
     }
 
@@ -298,9 +313,10 @@ class Iap2UsbMuxHost private constructor(
         fun open(
             pipe: Iap2UsbSession,
             readTimeoutMillis: Long = 1_000,
+            onTrace: (String) -> Unit = {},
         ): Iap2UsbMuxHost {
             require(readTimeoutMillis > 0) { "readTimeoutMillis must be positive" }
-            return Iap2UsbMuxHost(pipe, readTimeoutMillis).also {
+            return Iap2UsbMuxHost(pipe, readTimeoutMillis, onTrace).also {
                 try {
                     it.begin()
                 } catch (error: Throwable) {
@@ -331,6 +347,10 @@ class Iap2UsbMuxHost private constructor(
                 ((source[offset + 2].toInt() and 0xff) shl 8) or
                 (source[offset + 3].toInt() and 0xff)
     }
+
+    private fun ByteArray.toHex(): String =
+        if (isEmpty()) "<empty>"
+        else joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 }
 
 /** A blocking TCP byte stream carried by [Iap2UsbMuxHost]. */

@@ -33,7 +33,12 @@ internal class AirPlayIapTunnelStream(
                 )
             }
 
-            override fun onIap(bytes: ByteArray) = offer(bytes)
+            override fun onIap(bytes: ByteArray) {
+                session.logTrace(
+                    "iAP2 tunnel RX bytes=${bytes.size} bodyHex=${ProtocolTraceFormatter.hex(bytes)}",
+                )
+                offer(bytes)
+            }
 
             override fun onDebug(message: String) {
                 session.logTrace(message)
@@ -52,6 +57,9 @@ internal class AirPlayIapTunnelStream(
     )
 
     override fun send(data: ByteArray) {
+        session.logTrace(
+            "iAP2 tunnel TX bytes=${data.size} bodyHex=${ProtocolTraceFormatter.hex(data)}",
+        )
         synchronized(lock) {
             throwTerminalFailureLocked()
             if (closed) throw closedFailureLocked()

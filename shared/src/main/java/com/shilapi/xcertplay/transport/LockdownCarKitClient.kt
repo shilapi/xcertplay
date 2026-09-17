@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class LockdownCarKitClient(
     private val host: Iap2UsbMuxHost,
+    private val onTrace: (String) -> Unit = {},
 ) {
     @Throws(IphoneUsbException::class, GeneralSecurityException::class)
     fun open(pairedRecord: PairedRecord, label: String): BlockingDuplexByteStream =
@@ -26,7 +27,10 @@ class LockdownCarKitClient(
             destinationPort = Iap2UsbMuxHost.LOCKDOWN_PORT,
             timeoutMillis = STEP_TIMEOUT_MILLIS,
         )
-        val sessionTls = LockdownPlistChannel(lockdownConnection).use { plaintext ->
+        val sessionTls = LockdownPlistChannel(
+            lockdownConnection,
+            onTrace = onTrace,
+        ).use { plaintext ->
             val response = plaintext.request(
                 LockdownPlistValue.Dictionary(
                     linkedMapOf(
@@ -51,7 +55,7 @@ class LockdownCarKitClient(
             )
         }
 
-        val secureLockdown = LockdownPlistChannel(sessionTls)
+        val secureLockdown = LockdownPlistChannel(sessionTls, onTrace = onTrace)
         var serviceStream: BlockingDuplexByteStream? = null
         try {
             val response = secureLockdown.request(

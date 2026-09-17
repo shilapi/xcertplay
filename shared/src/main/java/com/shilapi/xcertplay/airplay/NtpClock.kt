@@ -16,7 +16,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transmit stamps. The resulting offset and round-trip time steer a local monotonic clock onto
  * the phone's media-clock domain, which /feedback reports.
  */
-class NtpClock : Closeable {
+class NtpClock(
+    private val onTrace: (String) -> Unit = {},
+) : Closeable {
     private val running = AtomicBoolean(false)
     private val socketLock = Any()
     private val clockLock = Any()
@@ -93,6 +95,10 @@ class NtpClock : Closeable {
         synchronized(clockLock) { pendingT1 = t1 }
         ntpBytes(t1).copyInto(packet, NTP_TRANSMIT_OFFSET)
         currentSocket()?.send(DatagramPacket(packet, packet.size, destination))
+        trace(
+            "NTP TX request destination=$destination " +
+                "packetHex=${ProtocolTraceFormatter.hex(packet)}",
+        )
     }
 
     private fun runReceiver() {
@@ -107,6 +113,10 @@ class NtpClock : Closeable {
             }
             val message = packet.data.copyOf(packet.length)
             val address = packet.address
+            trace(
+                "NTP RX source=${address ?: "unknown"}:${packet.port} bytes=${message.size} " +
+                    "packetHex=${ProtocolTraceFormatter.hex(message)}",
+            )
             if (message.size >= NTP_PACKET_BYTES && address != null) {
                 handleMessage(message, InetSocketAddress(address, packet.port))
             }
@@ -129,6 +139,10 @@ class NtpClock : Closeable {
         ntpBytes(syncedNtp()).copyInto(response, NTP_RECEIVE_OFFSET)
         ntpBytes(syncedNtp()).copyInto(response, NTP_TRANSMIT_OFFSET)
         currentSocket()?.send(DatagramPacket(response, response.size, source))
+        trace(
+            "NTP TX response destination=$source " +
+                "packetHex=${ProtocolTraceFormatter.hex(response)}",
+        )
     }
 
     private fun handleResponse(response: ByteArray) {
@@ -179,6 +193,14 @@ class NtpClock : Closeable {
     }
 
     private fun currentSocket(): DatagramSocket? = synchronized(socketLock) { socket }
+
+    private fun trace(message: String) {
+        try {
+            onTrace(message)
+        } catch (_: Exception) {
+            // Logging must never change timing behavior.
+        }
+    }
 
     private companion object {
         const val PT_REQUEST = 210

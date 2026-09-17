@@ -17,6 +17,7 @@ class RemoteMfiAuthenticationClient(
     private val connectTimeoutMillis: Int = DEFAULT_CONNECT_TIMEOUT_MILLIS,
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
     private val maximumAttempts: Int = DEFAULT_MAXIMUM_ATTEMPTS,
+    private val onTrace: (String) -> Unit = {},
 ) : MfiAuthenticator {
     private data class CertificateInfo(
         val type: MfiCertificateType,
@@ -213,6 +214,11 @@ class RemoteMfiAuthenticationClient(
     }
 
     private fun execute(method: String, path: String, requestBody: String?): HttpResponse {
+        val url = baseAddress + path
+        trace(
+            "HTTP TX method=$method url=$url " +
+                "body=${requestBody ?: "<empty>"}",
+        )
         val connection = URL(baseAddress + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
@@ -232,9 +238,18 @@ class RemoteMfiAuthenticationClient(
             val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
             val responseBody = stream?.use(::readUtf8Limited).orEmpty()
+            trace("HTTP RX status=$statusCode body=$responseBody")
             return HttpResponse(statusCode, responseBody)
         } finally {
             connection.disconnect()
+        }
+    }
+
+    private fun trace(message: String) {
+        try {
+            onTrace(message)
+        } catch (_: Exception) {
+            // Logging must never change MFi behavior.
         }
     }
 

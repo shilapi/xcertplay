@@ -33,6 +33,7 @@ class LockdownPlistChannel(
     private val connection: BlockingDuplexByteStream,
     private val maximumMessageBytes: Int = DEFAULT_MAXIMUM_MESSAGE_BYTES,
     private val defaultTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+    private val onTrace: (String) -> Unit = {},
 ) : Closeable {
     private val stateLock = Any()
     private val ioLock = Any()
@@ -107,6 +108,10 @@ class LockdownPlistChannel(
         val frame = ByteArray(LENGTH_BYTES + xml.size)
         putU32(frame, 0, xml.size.toLong())
         xml.copyInto(frame, LENGTH_BYTES)
+        trace(
+            "LOCKDOWN TX bytes=${frame.size} frameHex=${frame.toHex()} " +
+                "xml=${xml.toString(StandardCharsets.UTF_8)}",
+        )
         connection.send(frame)
     }
 
@@ -119,6 +124,11 @@ class LockdownPlistChannel(
             throw IphoneUsbException.Protocol("Invalid Lockdown plist message length $length (maximum $maximumMessageBytes)")
         }
         val xml = readFully(length.toInt(), deadlineNanos)
+        val frame = header + xml
+        trace(
+            "LOCKDOWN RX bytes=${frame.size} frameHex=${frame.toHex()} " +
+                "xml=${xml.toString(StandardCharsets.UTF_8)}",
+        )
         return parse(xml)
     }
 
@@ -305,6 +315,14 @@ class LockdownPlistChannel(
         }
     }
 
+    private fun trace(message: String) {
+        try {
+            onTrace(message)
+        } catch (_: Exception) {
+            // Logging must never change Lockdown behavior.
+        }
+    }
+
     private companion object {
         const val LENGTH_BYTES = 4
         const val DEFAULT_MAXIMUM_MESSAGE_BYTES = 1 * 1024 * 1024
@@ -327,5 +345,9 @@ class LockdownPlistChannel(
                 ((source[offset + 1].toLong() and 0xff) shl 16) or
                 ((source[offset + 2].toLong() and 0xff) shl 8) or
                 (source[offset + 3].toLong() and 0xff)
+
+        private fun ByteArray.toHex(): String =
+            if (isEmpty()) "<empty>"
+            else joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 }

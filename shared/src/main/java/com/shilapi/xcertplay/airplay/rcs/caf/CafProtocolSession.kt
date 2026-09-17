@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.airplay.rcs.caf
 
+import com.shilapi.xcertplay.airplay.ProtocolTraceFormatter
 import com.shilapi.xcertplay.airplay.rcs.RcsDataStream
 import com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandler
 import com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandlerFactory
@@ -33,6 +34,7 @@ class CafProtocolSession(
     }
 
     fun send(frame: CafRcsFrame) {
+        traceFrame("TX", frame.envelope, frame.rcsBody)
         stream.send(frame.asRcsMessage())
     }
 
@@ -128,6 +130,7 @@ class CafProtocolSession(
             )
         }
         val reader = CarAccessoryMessages.reader(message.body)
+        traceFrame("RX", reader.envelope, message.body)
         plugins.requireRegistration(reader.pluginId).also { registration ->
             if (clientType !in registration.clientTypes) {
                 throw CafProtocolException(
@@ -146,6 +149,23 @@ class CafProtocolSession(
 
     override fun close() {
         stream.close()
+    }
+
+    private fun traceFrame(
+        direction: String,
+        envelope: CafEnvelope,
+        body: ByteArray,
+    ) {
+        val message = envelope.message
+        stream.traceProtocol(
+            "CAF $direction pluginID=${envelope.pluginId} " +
+                "command=${message.command.wireName} " +
+                "transactionID=${message.transactionId ?: "none"} " +
+                "values=${ProtocolTraceFormatter.pretty(message.values)} " +
+                "errors=${ProtocolTraceFormatter.pretty(message.errors)} " +
+                "error=${message.error ?: "none"} " +
+                "body=${body.size}B bodyHex=${ProtocolTraceFormatter.hex(body)}",
+        )
     }
 
     companion object {
