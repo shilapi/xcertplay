@@ -5,6 +5,7 @@ import java.util.UUID
 
 enum class RcsPayloadStyle {
     CAF_BINARY_PLIST_OPACK,
+    UI_SYNC_PLIST,
     RAW_IAP2,
 
     /** UUID and carrier are known, but the application-level schema is not confirmed. */
@@ -51,7 +52,7 @@ object RcsClientTypes {
         uuid = UUID.fromString("07D9F906-8D64-4B54-A808-A20BCA2C51C2"),
         feature = AirPlayFeature.UI_SYNC,
         withoutReply = false,
-        payloadStyle = RcsPayloadStyle.UNCONFIRMED_OPAQUE,
+        payloadStyle = RcsPayloadStyle.UI_SYNC_PLIST,
     )
     val CAR_PLAY_UPDATE_DATA = RcsClientType(
         name = "CarPlayUpdateData",

@@ -33,6 +33,70 @@ data class AirPlayIcon(
 )
 
 /**
+ * One `vehicleStateProtocolInfo.pluginConfigs` entry.
+ *
+ * The firmware-confirmed envelope is a dictionary with an NSNumber [pluginId]. Additional fields
+ * are OEM/protocol-specific and are preserved without interpretation. The optional
+ * `pluginConfig` dictionary form discussed by the firmware reference remains representable via
+ * [fields].
+ */
+data class AirPlayVehicleStateProtocolPlugin(
+    val pluginId: Long,
+    val fields: Map<String, Any?> = emptyMap(),
+) {
+    init {
+        if (pluginId < 0) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginConfigs[].pluginID must be non-negative",
+            )
+        }
+        val suppliedPluginId = fields["pluginID"]
+        if (suppliedPluginId != null && toPluginId(suppliedPluginId) != pluginId) {
+            throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginConfigs[].pluginID must match the typed plugin ID",
+            )
+        }
+    }
+
+    fun toWireMap(): Map<String, Any?> = linkedMapOf<String, Any?>("pluginID" to pluginId).apply {
+        fields.forEach { (key, value) ->
+            if (key != "pluginID") put(key, value)
+        }
+    }
+
+    companion object {
+        fun of(
+            pluginId: Long,
+            vararg fields: Pair<String, Any?>,
+        ): AirPlayVehicleStateProtocolPlugin = AirPlayVehicleStateProtocolPlugin(
+            pluginId = pluginId,
+            fields = linkedMapOf(*fields),
+        )
+
+        fun fromWireMap(values: Map<String, Any?>): AirPlayVehicleStateProtocolPlugin {
+            val pluginId = values["pluginID"]
+                ?: throw AirPlayConfigurationException(
+                    "vehicleStateProtocolInfo.pluginConfigs[].pluginID is required",
+                )
+            return AirPlayVehicleStateProtocolPlugin(
+                pluginId = toPluginId(pluginId),
+                fields = LinkedHashMap(values),
+            )
+        }
+
+        private fun toPluginId(value: Any): Long = when (value) {
+            is Byte -> value.toLong()
+            is Short -> value.toLong()
+            is Int -> value.toLong()
+            is Long -> value
+            else -> throw AirPlayConfigurationException(
+                "vehicleStateProtocolInfo.pluginConfigs[].pluginID must be an integer",
+            )
+        }
+    }
+}
+
+/**
  * Vehicle-state plugin metadata advertised in `/info`.
  *
  * The outer schema is firmware-confirmed:
@@ -45,7 +109,7 @@ data class AirPlayIcon(
  */
 data class AirPlayVehicleStateProtocolInfo(
     val protocolVersion: String = "1.0",
-    val pluginConfigs: List<Map<String, Any?>>,
+    val pluginConfigs: List<AirPlayVehicleStateProtocolPlugin>,
     val pluginMapping: Map<String, Long> = emptyMap(),
 ) {
     companion object {
@@ -62,7 +126,9 @@ data class AirPlayVehicleStateProtocolInfo(
         ): AirPlayVehicleStateProtocolInfo? {
             if (registrations.isEmpty()) return null
             val pluginConfigs = registrations.map { registration ->
-                registration.wirePluginConfig()
+                AirPlayVehicleStateProtocolPlugin.fromWireMap(
+                    registration.wirePluginConfig(),
+                )
             }
             val effectiveMapping = LinkedHashMap(pluginMapping)
             registrations.forEach { registration ->
@@ -79,6 +145,19 @@ data class AirPlayVehicleStateProtocolInfo(
             return AirPlayVehicleStateProtocolInfo(
                 pluginConfigs = pluginConfigs,
                 pluginMapping = effectiveMapping,
+            )
+        }
+
+        fun fromPluginConfigs(
+            pluginConfigs: Collection<Map<String, Any?>>,
+            pluginMapping: Map<String, Long> = emptyMap(),
+        ): AirPlayVehicleStateProtocolInfo? {
+            if (pluginConfigs.isEmpty()) return null
+            return AirPlayVehicleStateProtocolInfo(
+                pluginConfigs = pluginConfigs.map(
+                    AirPlayVehicleStateProtocolPlugin::fromWireMap,
+                ),
+                pluginMapping = LinkedHashMap(pluginMapping),
             )
         }
 
@@ -101,6 +180,13 @@ data class AirPlayUiSyncInfo(
     val values: Map<String, Any?> = emptyMap(),
 ) {
     fun toWireMap(): Map<String, Any?> = LinkedHashMap(values)
+
+    companion object {
+        fun empty(): AirPlayUiSyncInfo = AirPlayUiSyncInfo()
+
+        fun fromWireMap(values: Map<String, Any?>): AirPlayUiSyncInfo =
+            AirPlayUiSyncInfo(LinkedHashMap(values))
+    }
 }
 
 /**

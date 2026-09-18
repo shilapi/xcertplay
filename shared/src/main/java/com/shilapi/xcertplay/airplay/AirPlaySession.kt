@@ -383,6 +383,10 @@ class AirPlaySession(
                     debugLog(
                         "airplay /info request altScreenURLs=${requestInfo.altScreenUrls} " +
                             "uiContextURLs=${requestInfo.uiContextUrls ?: "absent"} " +
+                            "uiContextLastOnDisplayURLs=" +
+                            "${requestInfo.uiContextLastOnDisplayUrls ?: "absent"} " +
+                            "uiContextNowOnDisplayURLs=" +
+                            "${requestInfo.uiContextNowOnDisplayUrls ?: "absent"} " +
                             "unrecognized=${requestInfo.unrecognized.keys.sorted()}",
                     )
                 }

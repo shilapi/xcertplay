@@ -7,6 +7,9 @@ import com.shilapi.xcertplay.airplay.rcs.caf.CafPluginRegistrationProvider
 import com.shilapi.xcertplay.airplay.rcs.caf.CafPluginRegistry
 import com.shilapi.xcertplay.airplay.rcs.caf.CarAccessoryMessages
 import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncMessageFactory
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncMessageType
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncProtocolVersion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -56,6 +59,26 @@ class AirPlayUltraProvisioningTest {
 
         assertEquals(CarPlayUltraFallbackProvisioning.PLUGIN_ID, reader.pluginId)
         assertEquals(emptyList<Any?>(), values["accessories"])
+    }
+
+    @Test
+    fun fallbackUiSyncMocksUseDocumentedEnvelopeFields() {
+        val reset = CarPlayUltraFallbackProvisioning.createMockUiSyncReset()
+        val command = CarPlayUltraFallbackProvisioning.createMockUiSyncCommand()
+
+        assertEquals(CarPlayUiSyncMessageType.RESET, reset.type)
+        assertEquals(CarPlayUiSyncProtocolVersion.V3, reset.version)
+        assertEquals(0L, reset.sessionSequenceNumber)
+        assertEquals(0L, reset.packetSequenceNumber)
+        assertEquals(0L, reset.acknowledgementSequenceNumber)
+
+        assertEquals(CarPlayUiSyncMessageType.COMMAND, command.type)
+        assertEquals(1L, command.sessionSequenceNumber)
+        assertEquals(1L, command.packetSequenceNumber)
+        assertEquals(0L, command.acknowledgementSequenceNumber)
+        assertEquals("targetAppearanceChange", command.commandPayload()!!.command.wireName)
+        assertEquals("dark", command.commandPayload()!!.fields["appearanceMode"])
+        assertEquals(command, CarPlayUiSyncMessageFactory.decode(command.toBplist()))
     }
 
     @Test
@@ -167,7 +190,9 @@ class AirPlayUltraProvisioningTest {
     @Test
     fun pluginMappingMustUseNamesAsKeysAndKnownNumericIdsAsValues() {
         val info = AirPlayVehicleStateProtocolInfo(
-            pluginConfigs = listOf(mapOf("pluginID" to 7L)),
+            pluginConfigs = listOf(
+                AirPlayVehicleStateProtocolPlugin(pluginId = 7L),
+            ),
             pluginMapping = mapOf("climate" to 8L),
         )
         val failure = assertThrows(AirPlayConfigurationException::class.java) {
@@ -200,34 +225,34 @@ class AirPlayUltraProvisioningTest {
 
     @Test
     fun pluginConfigEntriesRequirePluginId() {
-        val info = AirPlayVehicleStateProtocolInfo(
-            pluginConfigs = listOf(mapOf("pluginName" to "climate")),
-        )
-
         val failure = assertThrows(AirPlayConfigurationException::class.java) {
-            AirPlayFeatureNegotiation.validateEnabledFeatures(
-                config = config(
-                    AirPlayUltraConfig(
-                        cluster = cluster,
-                        vehicleStateProtocolInfo = info,
-                        runtime = AirPlayUltraRuntime.builder()
-                            .sidecar(
-                                AirPlayFeature.VEHICLE_STATE_PROTOCOL,
-                                info.toInfoResponseMap(),
-                            )
-                            .rcs(
-                                AirPlayFeatureCatalog.requiredRcsClientTypes(
-                                    AirPlayFeature.VEHICLE_STATE_PROTOCOL,
-                                ),
-                                RcsDataStreamHandlerFactory { null },
-                            )
-                            .build(),
-                    ),
-                ),
-                features = setOf(AirPlayFeature.VEHICLE_STATE_PROTOCOL),
+            AirPlayVehicleStateProtocolPlugin.fromWireMap(
+                mapOf("pluginName" to "climate"),
             )
         }
         assertTrue(failure.message!!.contains("pluginID"))
+    }
+
+    @Test
+    fun typedVehiclePluginPreservesOemFieldsAndRejectsContradictoryIds() {
+        val plugin = AirPlayVehicleStateProtocolPlugin.of(
+            pluginId = 7L,
+            "pluginConfig" to mapOf("accessories" to emptyList<Any?>()),
+        )
+
+        assertEquals(
+            mapOf(
+                "pluginID" to 7L,
+                "pluginConfig" to mapOf("accessories" to emptyList<Any?>()),
+            ),
+            plugin.toWireMap(),
+        )
+        assertThrows(AirPlayConfigurationException::class.java) {
+            AirPlayVehicleStateProtocolPlugin(
+                pluginId = 7L,
+                fields = mapOf("pluginID" to 8L),
+            )
+        }
     }
 
     @Test

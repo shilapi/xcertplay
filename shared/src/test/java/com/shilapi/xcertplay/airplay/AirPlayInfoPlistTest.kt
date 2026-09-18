@@ -255,7 +255,7 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
-    fun altScreenUrlsAreParsedFromInfoRequestAndNeverEchoedInResponse() {
+    fun infoRequestParsesUiContextUrlsAndNeverEchoesThemInResponse() {
         val request = AirPlayInfoRequestFactory.decode(
             BplistCodec.encode(
                 linkedMapOf(
@@ -263,6 +263,9 @@ class AirPlayInfoPlistTest {
                         "maps:/car/instrumentcluster/map",
                         "maps:/car/instrumentcluster",
                     ),
+                    "uiContextURLs" to listOf("maps:/car/context"),
+                    "uiContextLastOnDisplayURLs" to listOf("maps:/car/context/last"),
+                    "uiContextNowOnDisplayURLs" to listOf("maps:/car/context/now"),
                     "futureField" to 7,
                 ),
             ),
@@ -281,19 +284,34 @@ class AirPlayInfoPlistTest {
             listOf("maps:/car/instrumentcluster/map", "maps:/car/instrumentcluster"),
             request!!.altScreenUrls,
         )
-        assertNull(request.uiContextUrls)
+        assertEquals(listOf("maps:/car/context"), request.uiContextUrls)
+        assertEquals(
+            listOf("maps:/car/context/last"),
+            request.uiContextLastOnDisplayUrls,
+        )
+        assertEquals(
+            listOf("maps:/car/context/now"),
+            request.uiContextNowOnDisplayUrls,
+        )
         assertEquals(setOf("futureField"), request.unrecognized.keys)
         assertFalse(response.containsKey("altScreenURLs"))
+        assertEquals(
+            request,
+            AirPlayInfoRequestFactory.decode(AirPlayInfoRequestFactory.encode(request)),
+        )
     }
 
     @Test
     fun ultraAdvertisesAlternateDisplayAndProvidedSidecars() {
         val pluginConfigs = listOf(
-            mapOf(
-                "pluginID" to 7L,
-                "accessories" to listOf(mapOf("iid" to 1, "type" to 0x0000000001000001L)),
+            AirPlayVehicleStateProtocolPlugin.of(
+                pluginId = 7L,
+                "accessories" to listOf(
+                    mapOf("iid" to 1, "type" to 0x0000000001000001L),
+                ),
             ),
         )
+        val pluginConfigsWire = pluginConfigs.map(AirPlayVehicleStateProtocolPlugin::toWireMap)
         val pluginMapping = mapOf("climate" to 7L)
         val uiSyncInfo = AirPlayUiSyncInfo(
             mapOf("schemaVersion" to 1, "supportsDashboard" to true),
@@ -323,7 +341,7 @@ class AirPlayInfoPlistTest {
                             AirPlayFeature.VEHICLE_STATE_PROTOCOL to mapOf(
                                 "protocolVersion" to "1.0",
                                 "pluginCount" to pluginConfigs.size,
-                                "pluginConfigs" to pluginConfigs,
+                                "pluginConfigs" to pluginConfigsWire,
                                 "pluginMapping" to pluginMapping,
                             ),
                             AirPlayFeature.UI_SYNC to uiSyncInfo.toWireMap(),
@@ -346,7 +364,7 @@ class AirPlayInfoPlistTest {
         assertEquals("1.0", vehicle["protocolVersion"])
         assertEquals(1, vehicle["pluginCount"])
         assertTrue(vehicle["pluginConfigs"] is List<*>)
-        assertEquals(pluginConfigs, vehicle["pluginConfigs"])
+        assertEquals(pluginConfigsWire, vehicle["pluginConfigs"])
         assertEquals(pluginMapping, vehicle["pluginMapping"])
         assertEquals(uiSyncInfo.toWireMap(), info["uiSyncInfo"])
     }
@@ -407,7 +425,9 @@ class AirPlayInfoPlistTest {
                 ultra = AirPlayUltraConfig(
                     cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
                     vehicleStateProtocolInfo = AirPlayVehicleStateProtocolInfo(
-                        pluginConfigs = listOf(mapOf("pluginID" to 7)),
+                        pluginConfigs = listOf(
+                            AirPlayVehicleStateProtocolPlugin(pluginId = 7),
+                        ),
                     ),
                     uiSyncInfo = AirPlayUiSyncInfo(mapOf("schemaVersion" to 1)),
                 ),
@@ -446,9 +466,16 @@ class AirPlayInfoPlistTest {
     @Test
     fun vehicleStateProtocolArrayAndMappingSurviveBplistRoundTrip() {
         val pluginConfigs = listOf(
-            linkedMapOf<String, Any?>("pluginID" to 7L, "pluginName" to "climate"),
-            linkedMapOf<String, Any?>("pluginID" to 42L, "pluginName" to "media"),
+            AirPlayVehicleStateProtocolPlugin.of(
+                pluginId = 7L,
+                "pluginName" to "climate",
+            ),
+            AirPlayVehicleStateProtocolPlugin.of(
+                pluginId = 42L,
+                "pluginName" to "media",
+            ),
         )
+        val pluginConfigsWire = pluginConfigs.map(AirPlayVehicleStateProtocolPlugin::toWireMap)
         val pluginMapping = linkedMapOf<String, Long>(
             "climate" to 7L,
             "media" to 42L,
@@ -475,7 +502,7 @@ class AirPlayInfoPlistTest {
                             AirPlayFeature.VEHICLE_STATE_PROTOCOL to mapOf(
                                 "protocolVersion" to "1.0",
                                 "pluginCount" to pluginConfigs.size,
-                                "pluginConfigs" to pluginConfigs,
+                                "pluginConfigs" to pluginConfigsWire,
                                 "pluginMapping" to pluginMapping,
                             ),
                         ),

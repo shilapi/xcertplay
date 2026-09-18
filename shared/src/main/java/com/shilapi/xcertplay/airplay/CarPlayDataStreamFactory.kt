@@ -56,6 +56,7 @@ internal class CarPlayDataStreamFactory {
         when (clientType.payloadStyle) {
             RcsPayloadStyle.RAW_IAP2 -> CarPlayDataStreamKind.IAP_TUNNEL
             RcsPayloadStyle.CAF_BINARY_PLIST_OPACK,
+            RcsPayloadStyle.UI_SYNC_PLIST,
             RcsPayloadStyle.UNCONFIRMED_OPAQUE -> CarPlayDataStreamKind.RCS
         }
 

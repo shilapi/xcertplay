@@ -81,7 +81,7 @@ data class CafPluginRegistration(
     val clientTypes: Set<RcsClientType>,
     val handler: CafPluginHandler,
     val pluginName: String? = null,
-    val pluginConfig: Any? = null,
+    val pluginConfig: Map<String, Any?>? = null,
     val configTreeDecoder: CafConfigTreeDecoder? = null,
 ) {
     init {
@@ -100,14 +100,7 @@ data class CafPluginRegistration(
     fun wirePluginConfig(): Map<String, Any?> {
         val supplied = when (val value = pluginConfig) {
             null -> emptyMap()
-            is Map<*, *> -> value.entries.associate { (key, item) ->
-                (key as? String)
-                    ?: throw CafProtocolException("pluginConfig keys must be strings")
-                key to item
-            }
-            else -> throw CafProtocolException(
-                "CAF plugin $pluginId pluginConfig must be a dictionary",
-            )
+            else -> value
         }
         val suppliedId = supplied["pluginID"]
         if (suppliedId != null && toPluginId(suppliedId) != pluginId) {

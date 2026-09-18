@@ -13,6 +13,10 @@ import com.shilapi.xcertplay.airplay.rcs.caf.CafProtocolSession
 import com.shilapi.xcertplay.airplay.rcs.caf.CafRcsFrame
 import com.shilapi.xcertplay.airplay.rcs.caf.CarAccessoryMessages
 import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncCommand
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncMessage
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncMessageFactory
+import com.shilapi.xcertplay.airplay.rcs.uisync.CarPlayUiSyncProtocolVersion
 
 /**
  * Enables the mandatory Ultra channels with type-valid fallback payloads.
@@ -37,7 +41,7 @@ object CarPlayUltraFallbackProvisioning {
         )
         return AirPlayUltraProvisioning(
             pluginRegistrations = listOf(registration),
-            uiSyncInfo = AirPlayUiSyncInfo(),
+            uiSyncInfo = AirPlayUiSyncInfo.empty(),
             rcsFactories = mapOf(
                 RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL to CarPlayClusterControlFallbackFactory,
             ),
@@ -47,6 +51,23 @@ object CarPlayUltraFallbackProvisioning {
             ),
         )
     }
+
+    fun createMockUiSyncReset(): CarPlayUiSyncMessage =
+        CarPlayUiSyncMessageFactory.reset(
+            sessionSequenceNumber = 0,
+            packetSequenceNumber = 0,
+            acknowledgementSequenceNumber = 0,
+            version = CarPlayUiSyncProtocolVersion.V3,
+        )
+
+    fun createMockUiSyncCommand(): CarPlayUiSyncMessage =
+        CarPlayUiSyncMessageFactory.command(
+            sessionSequenceNumber = 1,
+            packetSequenceNumber = 1,
+            acknowledgementSequenceNumber = 0,
+            command = CarPlayUiSyncCommand.TARGET_APPEARANCE_CHANGE,
+            fields = mapOf("appearanceMode" to "dark"),
+        )
 }
 
 internal class CafFallbackPluginHandler(
@@ -146,9 +167,30 @@ private object CarPlayClusterControlFallbackHandler : RcsDataStreamHandler {
     }
 
     override fun onMessage(stream: RcsDataStream, message: RcsMessage) {
+        val decoded = runCatching {
+            CarPlayUiSyncMessageFactory.decode(message.body)
+        }
+        val summary = decoded.fold(
+            onSuccess = { sync ->
+                val command = runCatching { sync.commandPayload() }
+                    .getOrNull()
+                    ?.command
+                    ?.wireName
+                    ?: "none"
+                "type=${sync.type.wireName} ssn=${sync.sessionSequenceNumber} " +
+                    "psn=${sync.packetSequenceNumber} asn=${sync.acknowledgementSequenceNumber} " +
+                    "command=$command " +
+                    "noAck=${sync.noAck} vehicleID=${sync.vehicleId ?: "none"} " +
+                    "version=${sync.version?.wireName ?: "none"}"
+            },
+            onFailure = { error ->
+                "decodeFailed=${error.message ?: error.javaClass.simpleName}"
+            },
+        )
         stream.traceProtocol(
             "CarPlayClusterControl RX messageType=0x${message.messageType.toString(16)} " +
-                "body=${message.body.size}B bodyHex=${ProtocolTraceFormatter.hex(message.body)}",
+                "body=${message.body.size}B $summary " +
+                "bodyHex=${ProtocolTraceFormatter.hex(message.body)}",
         )
     }
 

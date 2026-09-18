@@ -302,7 +302,7 @@ internal fun AirPlayVehicleStateProtocolInfo.toInfoResponseMap(): Map<String, An
     return linkedMapOf(
         "protocolVersion" to protocolVersion,
         "pluginCount" to pluginConfigs.size,
-        "pluginConfigs" to pluginConfigs,
+        "pluginConfigs" to pluginConfigs.map(AirPlayVehicleStateProtocolPlugin::toWireMap),
         "pluginMapping" to pluginMapping,
     )
 }
@@ -320,21 +320,8 @@ private fun AirPlayVehicleStateProtocolInfo.validate() {
     }
 
     val pluginIds = LinkedHashSet<Long>()
-    pluginConfigs.forEachIndexed { index, plugin ->
-        val pluginId = when (val value = plugin["pluginID"]) {
-            is Byte -> value.toLong()
-            is Short -> value.toLong()
-            is Int -> value.toLong()
-            is Long -> value
-            else -> throw AirPlayConfigurationException(
-                "vehicleStateProtocolInfo.pluginConfigs[$index].pluginID must be an integer",
-            )
-        }
-        if (pluginId < 0) {
-            throw AirPlayConfigurationException(
-                "vehicleStateProtocolInfo.pluginConfigs[$index].pluginID must be non-negative",
-            )
-        }
+    pluginConfigs.forEach { plugin ->
+        val pluginId = plugin.pluginId
         if (!pluginIds.add(pluginId)) {
             throw AirPlayConfigurationException(
                 "vehicleStateProtocolInfo contains duplicate pluginID $pluginId",

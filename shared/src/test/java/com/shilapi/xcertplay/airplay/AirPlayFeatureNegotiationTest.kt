@@ -278,8 +278,8 @@ class AirPlayFeatureNegotiationTest {
     private fun vehicleStateProtocolInfo(): AirPlayVehicleStateProtocolInfo =
         AirPlayVehicleStateProtocolInfo(
             pluginConfigs = listOf(
-                mapOf(
-                    "pluginID" to 7L,
+                AirPlayVehicleStateProtocolPlugin.of(
+                    pluginId = 7L,
                     "accessories" to emptyList<Any?>(),
                 ),
             ),
@@ -290,6 +290,6 @@ class AirPlayFeatureNegotiationTest {
 private fun AirPlayVehicleStateProtocolInfo.asInfoResponse(): Map<String, Any?> = linkedMapOf(
     "protocolVersion" to protocolVersion,
     "pluginCount" to pluginConfigs.size,
-    "pluginConfigs" to pluginConfigs,
+    "pluginConfigs" to pluginConfigs.map(AirPlayVehicleStateProtocolPlugin::toWireMap),
     "pluginMapping" to pluginMapping,
 )
