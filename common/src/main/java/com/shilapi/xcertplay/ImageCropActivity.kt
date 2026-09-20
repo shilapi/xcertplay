@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
@@ -42,11 +43,18 @@ class ImageCropActivity : Activity() {
 
         cropView = SquareCropView(this)
         statusView = TextView(this).apply {
+            // The hint floats over the user's photo, which can be any colour, so it gets its own
+            // dark pill instead of dark text drawn straight onto the image.
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            text = "Loading image"
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setColor(GlassPalette.HINT_SCRIM)
+            }
+            text = "正在载入图片"
         }
 
         val controls = LinearLayout(this).apply {
@@ -56,8 +64,17 @@ class ImageCropActivity : Activity() {
         }
         controls.addView(
             Button(this).apply {
-                text = "Cancel"
+                text = "取消"
                 isAllCaps = false
+                textSize = 17f
+                setTextColor(GlassPalette.PRIMARY)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(18).toFloat()
+                    setColor(GlassPalette.BUTTON_NEUTRAL)
+                }
+                stateListAnimator = null
+                minHeight = dp(52)
                 setOnClickListener {
                     setResult(RESULT_CANCELED)
                     finish()
@@ -67,8 +84,17 @@ class ImageCropActivity : Activity() {
         )
         controls.addView(
             Button(this).apply {
-                text = "Save 1:1"
+                text = "保存 1:1"
                 isAllCaps = false
+                textSize = 17f
+                setTextColor(GlassPalette.BUTTON_TEXT)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(18).toFloat()
+                    setColor(GlassPalette.ACCENT)
+                }
+                stateListAnimator = null
+                minHeight = dp(52)
                 setOnClickListener { saveCrop() }
             },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -77,7 +103,10 @@ class ImageCropActivity : Activity() {
         )
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(GlassPalette.BACKGROUND_TOP, GlassPalette.BACKGROUND_BOTTOM),
+            )
             addView(
                 cropView,
                 FrameLayout.LayoutParams(
@@ -116,10 +145,10 @@ class ImageCropActivity : Activity() {
                     return@runOnUiThread
                 }
                 if (bitmap == null) {
-                    statusView.text = "Could not decode image"
+                    statusView.text = "无法解码图片"
                 } else {
                     cropView.setBitmap(bitmap)
-                    statusView.text = "Drag to move, pinch to zoom"
+                    statusView.text = "拖动移动，双指缩放"
                 }
             }
         }
@@ -133,13 +162,13 @@ class ImageCropActivity : Activity() {
 
     private fun saveCrop() {
         val cropped = cropView.cropToSquare() ?: run {
-            statusView.text = "Image is not ready"
+            statusView.text = "图片尚未就绪"
             return
         }
         val encoded = ByteArrayOutputStream().use { output ->
             if (!cropped.compress(Bitmap.CompressFormat.PNG, 100, output)) {
                 cropped.recycle()
-                statusView.text = "Could not encode image"
+                statusView.text = "无法编码图片"
                 return
             }
             cropped.recycle()
@@ -153,7 +182,7 @@ class ImageCropActivity : Activity() {
             )
             finish()
         } catch (_: Exception) {
-            statusView.text = "Could not save image"
+            statusView.text = "无法保存图片"
         }
     }
 
@@ -181,7 +210,7 @@ class ImageCropActivity : Activity() {
 
     private class SquareCropView(context: android.content.Context) : View(context) {
         private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private val dimPaint = Paint().apply { color = Color.argb(145, 0, 0, 0) }
+        private val dimPaint = Paint().apply { color = GlassPalette.CROP_MASK }
         private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.STROKE
@@ -219,7 +248,7 @@ class ImageCropActivity : Activity() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val source = bitmap ?: return
-            canvas.drawColor(Color.BLACK)
+            canvas.drawColor(GlassPalette.BACKGROUND_TOP)
             canvas.drawRect(0f, 0f, width.toFloat(), viewport.top, dimPaint)
             canvas.drawRect(0f, viewport.bottom, width.toFloat(), height.toFloat(), dimPaint)
             canvas.drawRect(0f, viewport.top, viewport.left, viewport.bottom, dimPaint)

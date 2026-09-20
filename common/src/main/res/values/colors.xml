@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Cold-start splash background. Matches `GlassPalette.BACKGROUND_TOP` (#F2F5F9), the light
+      glass gradient the host draws before any video arrives, so the system splash and the first
+      frame of the app are the same colour instead of flashing between two near-whites.
+    -->
+    <color name="xcertplay_splash_background">#FFF2F5F9</color>
+</resources>

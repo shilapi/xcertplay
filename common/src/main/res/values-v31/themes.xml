@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      API 31+ splash screen.
+
+      Without these the system derives the splash from `windowBackground` and stretches the app
+      icon across it, which is what made the cold start look like a stray Android robot on an
+      arbitrary white. Pinning the background to the app's own light glass colour and giving the
+      icon a shorter hold makes the launch read as one continuous surface.
+
+      Kept in `values-v31` because `android:windowSplashScreen*` only exists from API 31; the base
+      `Theme.Xcertplay` in `values/themes.xml` stays the single source of truth for older devices.
+    -->
+    <style name="Theme.Xcertplay" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowSplashScreenBackground">@color/xcertplay_splash_background</item>
+        <item name="android:windowSplashScreenAnimationDuration">200</item>
+    </style>
+</resources>
