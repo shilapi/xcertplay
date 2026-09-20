@@ -121,7 +121,7 @@ private fun LandscapeLaunchScreen(onEnterCarPlay: () -> Unit) {
                 }
                 Spacer(Modifier.height(18.dp))
                 Text(
-                    text = "连接 iPhone 后，在主界面三指向下滑动可打开设置",
+                    text = "点击左上角「设置」可调整配置，CarPlay 连接后自动隐藏",
                     color = LaunchSecondary,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center,

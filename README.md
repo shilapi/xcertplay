@@ -26,7 +26,8 @@ controller, and supports both wired and wireless CarPlay connections.
 ## Usage
 
 1. Pair your iPhone with the head unit via Bluetooth.
-2. In the app, swipe down with three fingers to open the Settings page.
+2. Launch the app and tap `设置` in the top-left corner to open the Settings page. The button
+   hides automatically once CarPlay is streaming, so configure everything before you connect.
 3. Make sure all the settings are configured as desired.
 4. Scroll to the bottom and select `Save & Reconnect`.
 5. Connect your MFi chip using the method you selected.

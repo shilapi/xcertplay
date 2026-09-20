@@ -218,6 +218,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
+    private var settingsButton: View? = null
     private var settingsMenu: View? = null
     private var mfiTargetGroup: RadioGroup? = null
     private var mfiI2cFields: View? = null
@@ -300,10 +301,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private var restartGeneration = 0
     private var reconnectScheduled = false
     private var sessionLog: SessionLogFile? = null
-    private var gestureSequenceActive = false
-    private var gestureTracking = false
-    private var gestureStartX = 0f
-    private var gestureStartY = 0f
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -635,6 +632,32 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         stageParams.setMargins(dp(12), dp(12), dp(12), 0)
 
+        // Replaces the old three-finger swipe: a visible settings button that hides once CarPlay
+        // is actually streaming, so it never covers the projected UI.
+        val settingsButtonView = TextView(this).apply {
+            text = "设置"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.argb(170, 0, 0, 0))
+            }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { openSettingsMenu() }
+        }
+        val settingsButtonParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START,
+        )
+        settingsButtonParams.setMargins(dp(12), dp(12), 0, 0)
+
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
         val editor = buildSafeAreaEditor().apply { visibility = View.GONE }
 
@@ -648,6 +671,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         root.addView(logScroll, statusParams)
         root.addView(stageStatus, stageParams)
+        root.addView(settingsButtonView, settingsButtonParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -664,6 +688,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         videoView = video
         gestureOverlay = gestureLayer
+        settingsButton = settingsButtonView
         settingsMenu = settings
         safeAreaEditor = editor
         statusView = log
@@ -3145,52 +3170,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
         if (menuOpen) return true
 
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                gestureSequenceActive = false
-                gestureTracking = false
-            }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                if (event.pointerCount == THREE_FINGER_COUNT && !gestureSequenceActive) {
-                    gestureSequenceActive = true
-                    gestureTracking = true
-                    gestureStartX = pointerCentroid(event, horizontal = true)
-                    gestureStartY = pointerCentroid(event, horizontal = false)
-                    controller?.sendTouch(emptyList())
-                    appendLog("Three-finger swipe tracking started")
-                    return true
-                }
-            }
-        }
-
-        if (gestureSequenceActive) {
-            if (!gestureTracking || event.pointerCount != THREE_FINGER_COUNT) {
-                if (event.actionMasked == MotionEvent.ACTION_UP ||
-                    event.actionMasked == MotionEvent.ACTION_CANCEL
-                ) {
-                    gestureSequenceActive = false
-                    gestureTracking = false
-                } else if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) {
-                    gestureTracking = false
-                }
-                return true
-            }
-            if (event.actionMasked == MotionEvent.ACTION_MOVE) {
-                val deltaX = Math.abs(pointerCentroid(event, horizontal = true) - gestureStartX)
-                val deltaY = pointerCentroid(event, horizontal = false) - gestureStartY
-                if (
-                    deltaY >= dp(THREE_FINGER_SWIPE_DISTANCE_DP) &&
-                    deltaY >= deltaX * THREE_FINGER_SWIPE_DIRECTION_RATIO
-                ) {
-                    gestureSequenceActive = false
-                    gestureTracking = false
-                    openSettingsMenu()
-                    return true
-                }
-            }
-            return true
-        }
-
         val contacts = CarPlayTouchMapper.contacts(event, view.width, view.height)
         val queued = controller?.sendTouch(contacts) ?: false
         when (event.actionMasked) {
@@ -3205,14 +3184,6 @@ class CarPlayHostActivity : ComponentActivity() {
             )
         }
         return true
-    }
-
-    private fun pointerCentroid(event: MotionEvent, horizontal: Boolean): Float {
-        var total = 0f
-        for (index in 0 until event.pointerCount) {
-            total += if (horizontal) event.getX(index) else event.getY(index)
-        }
-        return total / event.pointerCount
     }
 
     private fun onScreenStreamStateChanged(generation: Int, type: Int, active: Boolean) {
@@ -3247,6 +3218,11 @@ class CarPlayHostActivity : ComponentActivity() {
             !menuOpen &&
             activeScreenStreamTypes.isEmpty()
         stageStatusView?.visibility = if (showStage) View.VISIBLE else View.GONE
+        // The settings button is only an entry point while CarPlay is not on screen yet; once a
+        // stream is active it would sit on top of the projected UI, so hide it.
+        val carPlayOnScreen = activeScreenStreamTypes.isNotEmpty()
+        val showSettingsButton = !menuOpen && !shuttingDown.get() && !carPlayOnScreen
+        settingsButton?.visibility = if (showSettingsButton) View.VISIBLE else View.GONE
     }
 
     private fun appendLog(message: String) {
@@ -3361,9 +3337,6 @@ class CarPlayHostActivity : ComponentActivity() {
         const val AUDIO_CAPTURE_MARKER = "audio-capture.enabled"
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
         const val PROTOCOL_TRACE_PREFIX = "TRACE "
-        const val THREE_FINGER_COUNT = 3
-        const val THREE_FINGER_SWIPE_DISTANCE_DP = 72
-        const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 1.15f
         const val MAX_SETTINGS_MENU_WIDTH_PX = 1200
         val MENU_BACKGROUND = Color.rgb(12, 16, 19)
         val MENU_SECONDARY = Color.rgb(170, 180, 190)
