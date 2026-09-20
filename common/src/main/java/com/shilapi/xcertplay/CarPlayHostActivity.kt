@@ -299,6 +299,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var startAfterHandshakeReset = false
     private var restartGeneration = 0
     private var reconnectScheduled = false
+    private var reconnectRunnable: Runnable? = null
     private var sessionLog: SessionLogFile? = null
     private var gestureSequenceActive = false
     private var gestureTracking = false
@@ -552,6 +553,9 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        shuttingDown.set(true)
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
         currentSurface?.let { surface ->
@@ -564,6 +568,8 @@ class CarPlayHostActivity : ComponentActivity() {
         sessionLog?.append("Activity destroyed")
         sessionLog?.close()
         sessionLog = null
+        airPlayCommandExecutor.shutdownNow()
+        teardownExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -2794,6 +2800,13 @@ class CarPlayHostActivity : ComponentActivity() {
         val snapshot = CarPlayBackgroundSession.snapshot() ?: return false
         if (snapshot.controller.isClosed()) {
             CarPlayBackgroundSession.clear(snapshot.controller)
+            teardownExecutor.execute {
+                try {
+                    snapshot.sink.close()
+                } catch (_: Exception) {
+                    // Best effort.
+                }
+            }
             return false
         }
         controller = snapshot.controller
@@ -2983,21 +2996,21 @@ class CarPlayHostActivity : ComponentActivity() {
             RECONNECT_DELAY_MILLIS
         }
         appendLog("$reason; retrying in ${delayMillis}ms")
-        mainHandler.postDelayed(
-            {
-                reconnectScheduled = false
-                if (
-                    shuttingDown.get() ||
-                    menuOpen ||
-                    handshakeResetInProgress ||
-                    generation != restartGeneration
-                ) {
-                    return@postDelayed
-                }
-                restartCarPlay("Reconnecting after $reason")
-            },
-            delayMillis,
-        )
+        val runnable = Runnable {
+            reconnectScheduled = false
+            reconnectRunnable = null
+            if (
+                shuttingDown.get() ||
+                menuOpen ||
+                handshakeResetInProgress ||
+                generation != restartGeneration
+            ) {
+                return@Runnable
+            }
+            restartCarPlay("Reconnecting after $reason")
+        }
+        reconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMillis)
     }
 
     /** Full-stack fallback when an AirPlay-only reconnect is unavailable. */

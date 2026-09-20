@@ -290,7 +290,7 @@ class CarPlayController(
     }
 
     fun start() {
-        synchronized(this) {
+        synchronized(lifecycleLock) {
             if (closed) return
         }
         if (config.transport == CarPlayTransport.WIRED) {
@@ -331,7 +331,7 @@ class CarPlayController(
     }
 
     override fun close() {
-        synchronized(this) {
+        synchronized(lifecycleLock) {
             if (closed) return
             closed = true
         }
@@ -1242,6 +1242,10 @@ class CarPlayController(
             ncmOwnedLocally = false
             debugLog("wired NCM/VPN AirPlay transport attached")
             if (closed) {
+                // close() may have already nulled this.csm on its teardown thread;
+                // close the local reference to avoid leaking the just-created channel.
+                this.csm = null
+                closeBestEffort("CSM") { csm.close() }
                 vpnService?.detach()
                 return
             }
