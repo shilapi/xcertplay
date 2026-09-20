@@ -1,12 +1,14 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import java.io.IOException
 import java.io.InputStream
-import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -20,7 +22,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class IapTunnel(
     private val readKey: ByteArray,
-    bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
+    private val bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -31,56 +33,48 @@ class IapTunnel(
 
     private val closed = AtomicBoolean(false)
     private val readCounter = AtomicLong(0)
-    private val bindAddress =
-        if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
-    private val servers = mutableListOf<ServerSocket>()
+    // Written by the accept thread while `close` iterates, so these have to tolerate concurrent
+    // mutation without a `ConcurrentModificationException` mid-shutdown.
+    private val servers = CopyOnWriteArrayList<ServerSocket>()
     private var socket: Socket? = null
-    private val threads = mutableListOf<Thread>()
+    private val threads = CopyOnWriteArrayList<Thread>()
     private val peerConnected = CountDownLatch(1)
+    /** True while the single peer this tunnel serves is attached. */
+    private val peerAttached = AtomicBoolean(false)
     @Volatile private var listener: Listener = object : Listener {}
 
     fun listen(listener: Listener): Int {
         this.listener = listener
-        val bound = bindAny()
+        // Bind to the address the controller already reached us on. A wildcard listener would also
+        // expose the tunnel on every other interface the device happens to have, which matters
+        // because the tunnel carries unauthenticated framing that this class must decrypt.
+        val bound = runCatching { bindSpecific() }.getOrElse { error ->
+            listener.onDebug(
+                "AirPlay iAP tunnel bind to $bindAddress failed, using the wildcard: ${error.message}",
+            )
+            bindWildcard()
+        }
         servers += bound
         listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localSocketAddress}")
-        val secondaryAddress = if (bindAddress is java.net.Inet6Address) {
-            InetAddress.getByName("0.0.0.0")
-        } else {
-            InetAddress.getByName("::")
-        }
-        val secondary = ServerSocket()
-        runCatching {
-            secondary.apply {
-                reuseAddress = true
-                bind(InetSocketAddress(secondaryAddress, bound.localPort))
-            }
-        }.onSuccess { secondary ->
-            servers += secondary
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener bound=" +
-                    "${secondary.localSocketAddress}",
-            )
-        }.onFailure { error ->
-            safeClose(secondary)
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener failed address=" +
-                    "$secondaryAddress port=${bound.localPort}: ${error.message}",
-            )
-        }
-        servers.forEach { server ->
-            threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
-                isDaemon = true
-                start()
-            }
+        threads += Thread({ accept(bound) }, "airplay-iap-tunnel").apply {
+            isDaemon = true
+            start()
         }
         return bound.localPort
     }
 
-    private fun bindAny(): ServerSocket =
+    private fun bindSpecific(): ServerSocket =
         ServerSocket().apply {
             reuseAddress = true
             bind(InetSocketAddress(bindAddress, 0))
+        }
+
+    /** Only used when binding the specific address fails; matches the requested address family. */
+    private fun bindWildcard(): ServerSocket =
+        ServerSocket().apply {
+            reuseAddress = true
+            val wildcard = if (bindAddress is Inet6Address) "::" else "0.0.0.0"
+            bind(InetSocketAddress(InetAddress.getByName(wildcard), 0))
         }
 
     override fun close() {
@@ -119,12 +113,27 @@ class IapTunnel(
                 safeClose(accepted)
                 return
             }
+            // The tunnel carries exactly one iAP2 data stream, so only the first peer is served.
+            // Refusing the rest keeps `socket` meaning "the peer" and stops a stray connection
+            // from occupying the stream the real iPhone needs.
+            if (!peerAttached.compareAndSet(false, true)) {
+                listener.onDebug(
+                    "AirPlay iAP tunnel refused an extra peer ${accepted.remoteSocketAddress}",
+                )
+                safeClose(accepted)
+                continue
+            }
             accepted.setSoLinger(true, 0)
             socket = accepted
             readCounter.set(0)
             peerConnected.countDown()
             listener.onOpen(accepted.remoteSocketAddress?.toString())
-            run(accepted)
+            // Run the receive loop on its own thread. Calling it inline would block this loop,
+            // so a peer that connects and then stays silent would stop the real peer connecting.
+            threads += Thread({ run(accepted) }, "airplay-iap-tunnel-read").apply {
+                isDaemon = true
+                start()
+            }
         }
     }
 
@@ -151,11 +160,21 @@ class IapTunnel(
                 plaintext += decrypted.first
                 ciphertext = decrypted.second
                 plaintext = parsePackages(plaintext)
+                if (plaintext.size > MAX_PENDING_BYTES) {
+                    throw IOException(
+                        "CarPlay iAP tunnel receive buffer exceeded $MAX_PENDING_BYTES bytes",
+                    )
+                }
             }
         } catch (error: Exception) {
             failure = error
         } finally {
-            if (socket === sock) socket = null
+            if (socket === sock) {
+                socket = null
+                // Let a replacement peer attach: the iPhone can reopen the data stream without
+                // tearing the whole AirPlay session down.
+                peerAttached.set(false)
+            }
             safeClose(sock)
             if (!closed.get() && failure != null) listener.onClosed(failure)
         }
@@ -184,7 +203,11 @@ class IapTunnel(
         var offset = 0
         while (buffer.size - offset >= PACKAGE_HEADER_LEN) {
             val size = readU32Be(buffer, offset)
-            if (size < PACKAGE_HEADER_LEN || size > MAX_PACKAGE) break
+            if (size < PACKAGE_HEADER_LEN || size > MAX_PACKAGE) {
+                // There is no resynchronisation point in this framing, so a bad length cannot be
+                // skipped. Retaining the bytes would only grow the buffer until the process dies.
+                throw IOException("CarPlay iAP tunnel package length $size is out of range")
+            }
             if (buffer.size - offset < size) break
             val messageType = readU32Be(buffer, offset + MESSAGE_TYPE_OFFSET)
             if (messageType == MSG_TYPE_COMM) {
@@ -215,5 +238,8 @@ class IapTunnel(
         const val MSG_TYPE_COMM = 0x636f6d6d
         const val MAX_PACKAGE = 4 * 1024 * 1024
         const val READ_CHUNK_BYTES = 16 * 1024
+
+        /** One package may legitimately be in flight, so this only has to exceed MAX_PACKAGE. */
+        const val MAX_PENDING_BYTES = MAX_PACKAGE + READ_CHUNK_BYTES * 2
     }
 }

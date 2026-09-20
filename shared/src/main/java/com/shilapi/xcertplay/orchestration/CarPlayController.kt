@@ -73,6 +73,11 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.RejectedExecutionHandler
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -159,7 +164,33 @@ class CarPlayController(
         },
     )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    /**
+     * Serialises touch injection without ever queueing stale frames.
+     *
+     * Touch arrives at 60–120 Hz but each call is a complete state sample, so only the newest
+     * contact set is worth sending. An unbounded queue (what `newSingleThreadExecutor` gives)
+     * would instead accumulate outdated coordinates whenever the event channel is congested,
+     * which shows up on screen as the pointer drifting on after the finger has stopped.
+     * The queue therefore holds a single pending sample and a rejection drops the older one.
+     */
+    private val touchExecutor: ExecutorService = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(TOUCH_QUEUE_CAPACITY),
+        ThreadFactory { task -> Thread(task, "xcertplay-touch").apply { isDaemon = true } },
+        RejectedExecutionHandler { task, pool ->
+            if (pool.isShutdown) {
+                // Returning quietly here would make `execute` succeed without running anything,
+                // so `sendTouch` would report a touch it never sent. Throwing lets the caller's
+                // existing catch report the drop.
+                throw RejectedExecutionException("touch executor is shut down")
+            }
+            pool.queue.poll()
+            pool.execute(task)
+        },
+    )
     private val tunnelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hostId = UUID.randomUUID().toString().uppercase(Locale.US)
@@ -169,7 +200,14 @@ class CarPlayController(
     @Volatile private var uiStatusReporter: ((CarPlayStatus) -> Unit)? = reportStatus
     private val permissionGrant = AtomicBoolean(false)
     private val availabilityPollGeneration = AtomicInteger(0)
-    private var permissionPollGeneration = 0
+    /**
+     * Invalidates in-flight permission polls.
+     *
+     * Written from both the main thread (the USB permission broadcast) and the executor thread
+     * (the `openAsync` callback), so a plain `Int` would lose increments and leave a stale poll
+     * loop running against a device it no longer refers to.
+     */
+    private val permissionPollGeneration = AtomicInteger(0)
     private var reenumerationAttempts = 0
     private var lastReportedStatus: CarPlayStatus? = null
     private var mfiResetLogged = false
@@ -198,7 +236,12 @@ class CarPlayController(
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
     private var ch341PermissionCloseable: Closeable? = null
-    private var vpnLatch = CountDownLatch(1)
+    /**
+     * Released by `onServiceConnected`; a fresh one is armed by every `bindVpn` attempt and by
+     * `onServiceDisconnected`. Volatile because it is replaced on the main thread and awaited on
+     * the executor thread.
+     */
+    @Volatile private var vpnLatch = CountDownLatch(1)
     private val teardownComplete = CountDownLatch(1)
 
     private val serviceConnection = object : ServiceConnection {
@@ -209,6 +252,14 @@ class CarPlayController(
 
         override fun onServiceDisconnected(name: ComponentName) {
             vpnService = null
+            // The binding is gone, so forget it and release anyone waiting on the old latch,
+            // then re-arm for the next attempt. Without this reset `bindVpn` would keep seeing
+            // `vpnBound == true` and skip binding, while the already-open latch returned
+            // instantly with a null service — surfacing as "Could not bind the CarPlay AirPlay
+            // service", a message with nothing to do with the real cause.
+            vpnBound = false
+            vpnLatch.countDown()
+            vpnLatch = CountDownLatch(1)
             fail(IphoneUsbException.DeviceUnavailable("CarPlay VPN service disconnected"))
         }
     }
@@ -290,7 +341,9 @@ class CarPlayController(
     }
 
     fun start() {
-        synchronized(this) {
+        // `lifecycleLock` rather than `this`: `close`, `reconnectMfi` and `reconnectIphone` all
+        // publish the same `closed`/`phase` state, so they have to serialise on one lock.
+        synchronized(lifecycleLock) {
             if (closed) return
         }
         if (config.transport == CarPlayTransport.WIRED) {
@@ -331,14 +384,16 @@ class CarPlayController(
     }
 
     override fun close() {
-        synchronized(this) {
+        // Same lock as `reconnectMfi`/`reconnectIphone`, so a reconnect cannot slip past its
+        // `closed` check and start a discovery round after teardown has already begun.
+        synchronized(lifecycleLock) {
             if (closed) return
             closed = true
         }
         closeReceivers()
         availabilityPollGeneration.incrementAndGet()
         wirelessGeneration.incrementAndGet()
-        permissionPollGeneration += 1
+        permissionPollGeneration.incrementAndGet()
         touchExecutor.shutdownNow()
         tunnelExecutor.shutdownNow()
         val service = vpnService
@@ -391,6 +446,10 @@ class CarPlayController(
     }
 
     private fun startMfi() {
+        // `start`/`reconnectMfi` check `closed` outside this call, so re-check here: teardown
+        // may have completed in between, and setting `phase` afterwards would restart discovery
+        // on a closed controller.
+        if (closed) return
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.MFI
         onStatus(CarPlayStatus.DiscoveringMfi)
@@ -497,23 +556,23 @@ class CarPlayController(
             is Ch341UsbHost.PermissionResult.Granted -> {
                 // The system broadcast and CarUsbHandler's direct grant can both observe success.
                 if (!permissionGrant.compareAndSet(false, true)) return
-                permissionPollGeneration++
+                permissionPollGeneration.incrementAndGet()
                 openCh341(result.device)
             }
             is Ch341UsbHost.PermissionResult.Denied -> {
                 permissionGrant.set(true)
-                onStatus(CarPlayStatus.Failed("CH341 USB permission was denied"))
+                onStatus(CarPlayStatus.Failed("CH341 USB 权限被拒绝"))
             }
         }
     }
 
     /** Some car systems grant USB access through CarUsbHandler without delivering a broadcast. */
     private fun pollCh341Permission(device: UsbDevice) {
-        val generation = ++permissionPollGeneration
+        val generation = permissionPollGeneration.incrementAndGet()
         val deadlineNanos = System.nanoTime() + PERMISSION_POLL_TIMEOUT_MILLIS * 1_000_000L
         val check = object : Runnable {
             override fun run() {
-                if (closed || phase != Phase.MFI || generation != permissionPollGeneration) return
+                if (closed || phase != Phase.MFI || generation != permissionPollGeneration.get()) return
                 if (usbManager.hasPermission(device)) {
                     onCh341Permission(Ch341UsbHost.PermissionResult.Granted(device))
                     return
@@ -522,7 +581,7 @@ class CarPlayController(
                     if (permissionGrant.compareAndSet(false, true)) {
                         onStatus(
                             CarPlayStatus.Failed(
-                                "MFi USB permission was not granted; reconnect the CH341 to retry",
+                                "MFi USB 权限未授予；请重新连接 CH341 后重试",
                             ),
                         )
                     }
@@ -896,7 +955,7 @@ class CarPlayController(
                         Iap2WirelessControlTerminal.TIMED_OUT ->
                             onStatus(CarPlayStatus.ControlEnded)
                         Iap2WirelessControlTerminal.CHANNEL_CLOSED ->
-                            onStatus(CarPlayStatus.Failed("Wireless iAP2 tunnel closed"))
+                            onStatus(CarPlayStatus.Failed("无线 iAP2 通道已关闭"))
                     }
                 } catch (error: Throwable) {
                     if (!closed && generation == wirelessGeneration.get()) {
@@ -1011,6 +1070,8 @@ class CarPlayController(
     }
 
     private fun startIphone() {
+        // Same re-check as `startMfi`: the caller's `closed` test is outside this call.
+        if (closed) return
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.IPHONE
         reenumerationAttempts = 0
@@ -1065,7 +1126,7 @@ class CarPlayController(
                 // The system broadcast and the polling fallback can both observe the grant.
                 if (!permissionGrant.compareAndSet(false, true)) return
                 debugLog("wired iPhone USB permission granted")
-                permissionPollGeneration++
+                permissionPollGeneration.incrementAndGet()
                 when (phase) {
                     Phase.REENUMERATION, Phase.IPHONE -> {
                         if (IphoneCarPlayConfiguration.find(result.device) != null) {
@@ -1085,18 +1146,18 @@ class CarPlayController(
             }
             is IphoneUsbHost.PermissionResult.Denied -> {
                 permissionGrant.set(true)
-                onStatus(CarPlayStatus.Failed("iPhone USB permission was denied"))
+                onStatus(CarPlayStatus.Failed("iPhone USB 权限被拒绝"))
             }
         }
     }
 
     /** Some Android builds grant the dialog without delivering the permission broadcast. */
     private fun pollIphonePermission(device: UsbDevice) {
-        val generation = ++permissionPollGeneration
+        val generation = permissionPollGeneration.incrementAndGet()
         val deadlineNanos = System.nanoTime() + PERMISSION_POLL_TIMEOUT_MILLIS * 1_000_000L
         val check = object : Runnable {
             override fun run() {
-                if (closed || generation != permissionPollGeneration) return
+                if (closed || generation != permissionPollGeneration.get()) return
                 if (usbManager.hasPermission(device)) {
                     onIphonePermission(IphoneUsbHost.PermissionResult.Granted(device))
                     return
@@ -1105,7 +1166,7 @@ class CarPlayController(
                     if (permissionGrant.compareAndSet(false, true)) {
                         onStatus(
                             CarPlayStatus.Failed(
-                                "iPhone USB permission was not granted; tap Reconnect iPhone to retry",
+                                "iPhone USB 权限未授予；请重新连接 iPhone 后重试",
                             ),
                         )
                     }
@@ -1270,12 +1331,19 @@ class CarPlayController(
                 when (result.terminal) {
                     Iap2WiredControlTerminal.TIMED_OUT -> CarPlayStatus.ControlEnded
                     Iap2WiredControlTerminal.CHANNEL_CLOSED ->
-                        CarPlayStatus.Failed("CarPlay control channel closed")
+                        CarPlayStatus.Failed("CarPlay 控制通道已关闭")
                 },
             )
         } catch (error: Throwable) {
             debugLog("wired bring-up failed", error)
             if (!ncmOwnedLocally) vpnService?.detach()
+            // `fail` only reports status and does no cleanup, so release the sockets opened
+            // above here. Otherwise the iAP2 CSM channel and the USBMUX host stay open until
+            // the user closes the app, holding the USB interface away from the next attempt.
+            closeBestEffort("wired CSM") { csm?.close() }
+            csm = null
+            closeBestEffort("wired USBMUX") { mux?.close() }
+            mux = null
             fail(error)
         } finally {
             if (ncmOwnedLocally) ncm.close()
@@ -1485,7 +1553,20 @@ class CarPlayController(
                 } catch (error: SecurityException) {
                     Log.w(IphoneCarPlayConfiguration.TAG, "Could not read connected Bluetooth devices", error)
                 } finally {
-                    adapter.closeProfileProxy(profileId, proxy)
+                    // Release first, then wake the caller. `closeProfileProxy` is a binder call
+                    // into the Bluetooth service and can throw; if that happened before the
+                    // count-down the caller would sit out the whole timeout for nothing.
+                    // Note the proxy is released here even when the caller has already given up,
+                    // so a late callback cannot leak it.
+                    try {
+                        adapter.closeProfileProxy(profileId, proxy)
+                    } catch (error: RuntimeException) {
+                        Log.w(
+                            IphoneCarPlayConfiguration.TAG,
+                            "Could not release the Bluetooth profile $profileId proxy",
+                            error,
+                        )
+                    }
                     latch.countDown()
                 }
             }
@@ -1496,6 +1577,10 @@ class CarPlayController(
         }
         if (!adapter.getProfileProxy(appContext, listener, profile)) return emptySet()
         if (!latch.await(3, TimeUnit.SECONDS)) {
+            // Giving up here leaks nothing: the proxy only comes into existence when
+            // `onServiceConnected` runs, and that callback releases it before returning even if
+            // we have already stopped waiting. The caller treats an empty set as "unknown" and
+            // falls back to the bonded-iPhone list.
             Log.w(IphoneCarPlayConfiguration.TAG, "Timed out reading Bluetooth profile $profile")
         }
         return synchronized(devices) { devices.toSet() }
@@ -1585,8 +1670,11 @@ class CarPlayController(
     private fun awaitVpnService(): CarPlayVpnService? {
         vpnService?.let { return it }
         bindVpn()
+        // Snapshot the latch this attempt armed, so a concurrent re-arm cannot make the wait
+        // observe a latch that is never counted down.
+        val latch = vpnLatch
         return try {
-            if (vpnLatch.await(VPN_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
+            if (latch.await(VPN_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             null
@@ -1596,15 +1684,19 @@ class CarPlayController(
     private fun bindVpn() {
         if (vpnBound) return
         vpnBound = true
+        // Arm a fresh latch before requesting the binding. Reusing a previously counted-down
+        // latch would make the wait below succeed instantly while `vpnService` is still null.
+        val latch = CountDownLatch(1)
+        vpnLatch = latch
         try {
             val intent = Intent(appContext, CarPlayVpnService::class.java)
             if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
                 vpnBound = false
-                vpnLatch.countDown()
+                latch.countDown()
             }
         } catch (_: Throwable) {
             vpnBound = false
-            vpnLatch.countDown()
+            latch.countDown()
         }
     }
 
@@ -1745,6 +1837,8 @@ class CarPlayController(
         private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 15_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
+        /** One touch sample may be in flight and one queued; anything older is worthless. */
+        private const val TOUCH_QUEUE_CAPACITY = 1
         private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"
         private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
     }

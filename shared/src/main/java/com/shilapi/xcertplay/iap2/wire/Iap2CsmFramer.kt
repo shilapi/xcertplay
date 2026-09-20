@@ -24,6 +24,12 @@ class Iap2CsmFramer {
         while (offset < chunk.size) {
             drain(frames)
             val count = minOf(chunk.size - offset, receive.remainingCapacity())
+            // This cannot fire, and the reason is worth stating: the buffer holds exactly
+            // MAX_FRAME_BYTES and a frame length is a u16, so a buffer that is completely full
+            // necessarily satisfies `size >= length` and therefore yields a complete frame for
+            // `drain` to consume. Space is always freed before the next append. If the buffer were
+            // ever sized differently from the u16 maximum, this check is what would catch it
+            // instead of the loop silently dropping bytes.
             check(count > 0) { "CSM receive buffer could not make progress" }
             receive.append(chunk, offset, count)
             offset += count

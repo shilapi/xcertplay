@@ -9,18 +9,31 @@ package com.shilapi.xcertplay.airplay
 class PairVerify(
     private val identity: AirPlayIdentity,
     private val pairings: PairingStore,
+    /**
+     * Local diagnostics only. Every rejection still answers with the same error code, so a peer
+     * cannot learn which check turned it away — but an operator needs to know why.
+     */
+    private val onDebug: (String) -> Unit = {},
 ) {
     data class ControlKeys(val readKey: ByteArray, val writeKey: ByteArray)
 
-    private var ephemeralPublicKey: ByteArray? = null
-    private var clientEphemeralPublicKey: ByteArray? = null
-    private var sharedSecret: ByteArray? = null
-    private var encryptionKey: ByteArray? = null
-    private var keys: ControlKeys? = null
-    private var verified = false
-    private var controllerId: String? = null
+    /**
+     * Handshake position. The peer chooses which message to send, so the accessory has to track
+     * where the exchange actually is instead of trusting the state number in the request.
+     */
+    private enum class Stage { IDLE, SENT_M2, VERIFIED }
 
-    val isVerified: Boolean get() = verified
+    // `stage` is the publication point: every field below is written before it and read only after
+    // it, so a volatile read of `stage` makes the associated values visible to other threads.
+    @Volatile private var stage = Stage.IDLE
+    @Volatile private var ephemeralPublicKey: ByteArray? = null
+    @Volatile private var clientEphemeralPublicKey: ByteArray? = null
+    @Volatile private var sharedSecret: ByteArray? = null
+    @Volatile private var encryptionKey: ByteArray? = null
+    @Volatile private var keys: ControlKeys? = null
+    @Volatile private var controllerId: String? = null
+
+    val isVerified: Boolean get() = stage == Stage.VERIFIED
     val verifiedControllerId: String? get() = controllerId
     val controlKeys: ControlKeys? get() = keys
     val shared: ByteArray? get() = sharedSecret
@@ -29,12 +42,20 @@ class PairVerify(
         val tlv = Tlv8Codec.decode(body)
         val state = tlv[TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xff)
         return try {
-            when (state) {
-                1 -> m2(tlv)
-                3 -> m4(tlv)
-                else -> err(state ?: 0)
+            when {
+                // Message 1 opens the exchange and is accepted only once. Replaying it would
+                // replace the shared secret with one derived from a key pair the peer generated
+                // itself, while leaving `keys` and the verified stage from the real handshake.
+                state == 1 && stage == Stage.IDLE -> m2(tlv)
+                // Message 3 is only meaningful after our message 2.
+                state == 3 && stage == Stage.SENT_M2 -> m4(tlv)
+                else -> {
+                    onDebug("pair-verify unexpected state=$state stage=$stage")
+                    err(state ?: 0)
+                }
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            onDebug("pair-verify failed: ${error.message ?: error.javaClass.simpleName}")
             err(state ?: 0)
         }
     }
@@ -62,6 +83,8 @@ class PairVerify(
             ),
         )
         val sealed = AirPlayCrypto.chachaSeal(encryptionKey, AirPlayCrypto.nonceLabel(MSG02), sub)
+        // Published last: a reader that observes SENT_M2 also observes the keys written above.
+        stage = Stage.SENT_M2
         return Tlv8Codec.encode(
             listOf(
                 Tlv8Item(TYPE_STATE, byteArrayOf(2)),
@@ -81,24 +104,40 @@ class PairVerify(
             encryptionKey == null || shared == null || ownEphemeralPublicKey == null ||
             clientEphemeralPublicKey == null || encrypted == null
         ) {
-            return err(4)
+            return reject("message 3 arrived before the keys from message 2")
         }
 
         val sub = Tlv8Codec.decode(AirPlayCrypto.chachaOpen(encryptionKey, AirPlayCrypto.nonceLabel(MSG03), encrypted))
         val controllerId = sub[TYPE_IDENTIFIER]
         val controllerSignature = sub[TYPE_SIGNATURE]
-        if (controllerId == null || controllerSignature == null) return err(4)
+        if (controllerId == null || controllerSignature == null) {
+            return reject("message 3 is missing the identifier or the signature")
+        }
 
-        val controllerLtpk = pairings.get(controllerId.toString(Charsets.UTF_8)) ?: return err(4)
+        val controllerName = controllerId.toString(Charsets.UTF_8)
+        val controllerLtpk = pairings.get(controllerName)
+            ?: return reject("unknown controller '$controllerName'")
         val signatureData = concatBytes(clientEphemeralPublicKey, controllerId, ownEphemeralPublicKey)
-        if (!AirPlayCrypto.ed25519Verify(controllerLtpk, signatureData, controllerSignature)) return err(4)
+        if (!AirPlayCrypto.ed25519Verify(controllerLtpk, signatureData, controllerSignature)) {
+            return reject("signature check failed for controller '$controllerName'")
+        }
 
         val readKey = AirPlayCrypto.hkdfSha512(shared, CONTROL_SALT.asciiBytes(), CONTROL_WRITE_KEY_INFO.asciiBytes())
         val writeKey = AirPlayCrypto.hkdfSha512(shared, CONTROL_SALT.asciiBytes(), CONTROL_READ_KEY_INFO.asciiBytes())
         keys = ControlKeys(readKey, writeKey)
-        verified = true
-        this.controllerId = controllerId.toString(Charsets.UTF_8)
+        this.controllerId = controllerName
+        // Published last: a reader that observes VERIFIED also observes the control keys above.
+        stage = Stage.VERIFIED
         return Tlv8Codec.encode(listOf(Tlv8Item(TYPE_STATE, byteArrayOf(4))))
+    }
+
+    /**
+     * Answers a verification failure with the uniform authentication error while recording the
+     * real reason locally. The peer must not be told which check rejected it.
+     */
+    private fun reject(reason: String): ByteArray {
+        onDebug("pair-verify rejected: $reason")
+        return err(4)
     }
 
     private fun err(state: Int): ByteArray = Tlv8Codec.encode(

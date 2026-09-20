@@ -10,22 +10,51 @@ package com.shilapi.xcertplay.airplay
 object BplistCodec {
     private val magic = "bplist00".toByteArray(Charsets.US_ASCII)
 
+    /** Eight-byte magic plus the 32-byte trailer. */
+    private const val MIN_FILE_BYTES = 40
+
+    /** The trailer's offset/ref widths are used as read widths, so they must be sane. */
+    private const val MAX_TRAILER_WIDTH = 8
+
+    /** Bounds the object graph walk so a referencing cycle cannot exhaust the stack. */
+    private const val MAX_NESTING_DEPTH = 64
+
     fun decode(bytes: ByteArray): Any? {
-        require(bytes.size >= 40) { "bplist: too short" }
+        require(bytes.size >= MIN_FILE_BYTES) { "bplist: too short" }
         require(bytes.copyOfRange(0, magic.size).contentEquals(magic)) { "bplist: bad magic" }
 
         val trailer = bytes.size - 32
         val offsetSize = bytes[trailer + 6].toInt() and 0xff
         val refSize = bytes[trailer + 7].toInt() and 0xff
-        val numObjects = readBigEndianLong(bytes, (trailer + 8).toLong(), 8).toInt()
-        val topObject = readBigEndianLong(bytes, (trailer + 16).toLong(), 8).toInt()
+        require(offsetSize in 1..MAX_TRAILER_WIDTH) {
+            "bplist: offsetIntSize $offsetSize is not in 1..$MAX_TRAILER_WIDTH"
+        }
+        require(refSize in 1..MAX_TRAILER_WIDTH) {
+            "bplist: objectRefSize $refSize is not in 1..$MAX_TRAILER_WIDTH"
+        }
+
+        val numObjects = readBigEndianLong(bytes, (trailer + 8).toLong(), 8)
+        val topObject = readBigEndianLong(bytes, (trailer + 16).toLong(), 8)
         val offsetTable = readBigEndianLong(bytes, (trailer + 24).toLong(), 8)
 
-        val offsets = LongArray(numObjects)
+        // The trailer is peer input. Without this bound a declared object count becomes a huge
+        // LongArray allocation before a single object is read, which surfaces as an Error the
+        // callers' `catch (Exception)` cannot see.
+        require(numObjects in 1..(bytes.size.toLong() / offsetSize)) {
+            "bplist: numObjects $numObjects does not fit the ${bytes.size}-byte file"
+        }
+        require(topObject in 0 until numObjects) {
+            "bplist: topObject $topObject is outside 0..${numObjects - 1}"
+        }
+
+        val offsets = LongArray(numObjects.toInt())
         for (index in offsets.indices) {
             offsets[index] = readBigEndianLong(bytes, offsetTable + index.toLong() * offsetSize, offsetSize)
+            require(offsets[index] in 0 until bytes.size.toLong()) {
+                "bplist: object $index offset ${offsets[index]} is outside the ${bytes.size}-byte file"
+            }
         }
-        return readObject(bytes, offsets, refSize, topObject)
+        return readObject(bytes, offsets, refSize, topObject.toInt(), 0)
     }
 
     fun encode(root: Any?): ByteArray {
@@ -109,8 +138,23 @@ object BplistCodec {
         return concatBytes(*parts.toTypedArray())
     }
 
-    private fun readObject(bytes: ByteArray, offsets: LongArray, refSize: Int, index: Int): Any? {
+    private fun readObject(
+        bytes: ByteArray,
+        offsets: LongArray,
+        refSize: Int,
+        index: Int,
+        depth: Int,
+    ): Any? {
+        // A self-referencing (or mutually referencing) object graph would otherwise recurse until
+        // the stack is exhausted, which surfaces as a StackOverflowError rather than an Exception.
+        require(depth <= MAX_NESTING_DEPTH) {
+            "bplist: object graph nests deeper than $MAX_NESTING_DEPTH"
+        }
+        require(index in offsets.indices) {
+            "bplist: object reference $index is outside 0..${offsets.size - 1}"
+        }
         var position = offsets[index].toInt()
+        require(position < bytes.size) { "bplist: object $index starts past the end of the file" }
         val markerByte = bytes[position].toInt() and 0xff
         val type = markerByte ushr 4
         val nibble = markerByte and 0x0f
@@ -118,12 +162,33 @@ object BplistCodec {
 
         fun readCount(): Int {
             if (nibble != 0x0f) return nibble
+            require(position < bytes.size) { "bplist: truncated count marker" }
             val sizeMarker = bytes[position].toInt() and 0xff
             position++
-            val intBytes = 1 shl (sizeMarker and 0x0f)
-            val count = readBigEndianLong(bytes, position.toLong(), intBytes).toInt()
+            val widthNibble = sizeMarker and 0x0f
+            // The low nibble is the base-2 logarithm of the count width; Apple emits 0..3
+            // (1, 2, 4 or 8 bytes). Anything larger is malformed and would read a huge field.
+            require(widthNibble <= 3) { "bplist: count width nibble $widthNibble is not supported" }
+            val intBytes = 1 shl widthNibble
+            val count = readBigEndianLong(bytes, position.toLong(), intBytes)
+            require(count in 0..Int.MAX_VALUE.toLong()) { "bplist: count $count is out of range" }
             position += intBytes
-            return count
+            return count.toInt()
+        }
+
+        /** Rejects a declared element count that cannot fit in the bytes that actually remain. */
+        fun requireRoom(count: Int, elementBytes: Int, what: String) {
+            val available = bytes.size - position
+            require(count <= available / elementBytes) {
+                "bplist: $what declares $count elements but only $available bytes remain"
+            }
+        }
+
+        /** Confines a read of [count] bytes starting at [position] to the buffer. */
+        fun requireAvailable(count: Int, what: String) {
+            require(count >= 0 && position.toLong() + count <= bytes.size.toLong()) {
+                "bplist: $what needs $count bytes at $position but the file is ${bytes.size} bytes"
+            }
         }
 
         return when (type) {
@@ -133,8 +198,19 @@ object BplistCodec {
                 else -> throw IllegalArgumentException("bplist: unsupported primitive 0x0$nibble")
             }
             0x1 -> {
+                // 1, 2, 4, 8 or 16 bytes. Sixteen is not exotic: an encoder that treats the value
+                // as signed has to widen anything above 2^63-1 to 16 bytes, and Python's plistlib
+                // does exactly that. Only the low 64 bits fit a Long, which is what this decoder
+                // has always returned for such an object, so read the trailing eight bytes rather
+                // than refusing the whole plist — a refusal here fails SETUP with 400.
+                require(nibble <= 4) { "bplist: integer width nibble $nibble is not supported" }
                 val size = 1 shl nibble
-                readBigEndianLong(bytes, position.toLong(), size)
+                requireAvailable(size, "integer")
+                readBigEndianLong(
+                    bytes,
+                    position.toLong() + (size - 8).coerceAtLeast(0),
+                    minOf(size, 8),
+                )
             }
             0x2 -> {
                 val size = 1 shl nibble
@@ -146,34 +222,39 @@ object BplistCodec {
             }
             0x4 -> {
                 val count = readCount()
+                requireRoom(count, 1, "data")
                 bytes.copyOfRange(position, position + count)
             }
             0x5 -> {
                 val count = readCount()
+                requireRoom(count, 1, "string")
                 String(bytes, position, count, Charsets.US_ASCII)
             }
             0x6 -> {
                 val count = readCount()
+                requireRoom(count, 2, "UTF-16 string")
                 String(bytes, position, count * 2, Charsets.UTF_16BE)
             }
             0xa -> {
                 val count = readCount()
+                requireRoom(count, refSize, "array")
                 val array = ArrayList<Any?>(count)
                 for (i in 0 until count) {
                     val reference = readBigEndianLong(bytes, position + i.toLong() * refSize, refSize).toInt()
-                    array.add(readObject(bytes, offsets, refSize, reference))
+                    array.add(readObject(bytes, offsets, refSize, reference, depth + 1))
                 }
                 array
             }
             0xd -> {
                 val count = readCount()
+                requireRoom(count, 2 * refSize, "dictionary")
                 val dict = LinkedHashMap<String, Any?>(count)
                 for (i in 0 until count) {
                     val keyReference = readBigEndianLong(bytes, position + i.toLong() * refSize, refSize).toInt()
                     val valueReference =
                         readBigEndianLong(bytes, position + (count + i).toLong() * refSize, refSize).toInt()
-                    dict[readObject(bytes, offsets, refSize, keyReference).toString()] =
-                        readObject(bytes, offsets, refSize, valueReference)
+                    dict[readObject(bytes, offsets, refSize, keyReference, depth + 1).toString()] =
+                        readObject(bytes, offsets, refSize, valueReference, depth + 1)
                 }
                 dict
             }
@@ -219,8 +300,15 @@ object BplistCodec {
             2 -> 1
             else -> 0
         }
+        // BigInteger.toByteArray() is a minimal two's-complement encoding, so a positive value
+        // whose top bit is set carries an extra sign byte. It can therefore be shorter than `size`
+        // (e.g. 2^32 encodes to five bytes, not eight), which made a plain slice start at a
+        // negative index. Zero-extend to exactly `size` bytes instead.
         val raw = number.toByteArray()
-        return byteArrayOf((0x10 or log).toByte()) + raw.copyOfRange(raw.size - size, raw.size)
+        val low = raw.copyOfRange((raw.size - size).coerceAtLeast(0), raw.size)
+        val output = ByteArray(size)
+        low.copyInto(output, size - low.size)
+        return byteArrayOf((0x10 or log).toByte()) + output
     }
 
     private fun marker(type: Int, count: Int): ByteArray {
@@ -260,8 +348,14 @@ object BplistCodec {
     }
 
     private fun readBigEndianLong(bytes: ByteArray, offset: Long, size: Int): Long {
+        // `offset` arrives from the trailer and from object references, so it is range-checked as a
+        // Long before any narrowing, and the read is confined to the buffer.
+        require(size in 0..8) { "bplist: read width $size is not in 0..8" }
+        require(offset >= 0 && offset + size <= bytes.size.toLong()) {
+            "bplist: read of $size bytes at $offset is outside the ${bytes.size}-byte file"
+        }
         var value = 0L
-        var base = offset.toInt()
+        val base = offset.toInt()
         for (index in 0 until size) {
             value = (value shl 8) or (bytes[base + index].toLong() and 0xffL)
         }

@@ -629,7 +629,13 @@ class Iap2LinkEngine(
         const val EA_SESSION_ID = 11
         const val FILE_TRANSFER_SESSION_ID = 12
 
-        val IAP2_MARKER = byteArrayOf(0xff.toByte(), 0x55, 0x02, 0x00, 0xee.toByte(), 0x10)
+        /**
+         * Link-layer marker that opens every iAP2 frame.
+         *
+         * Private and never handed out: `ByteArray` is mutable, so a public constant would let
+         * any caller rewrite the framing of every frame this engine emits or accepts.
+         */
+        private val IAP2_MARKER = byteArrayOf(0xff.toByte(), 0x55, 0x02, 0x00, 0xee.toByte(), 0x10)
 
         private const val HEADER_BYTES = 9
         private const val CHECKSUM_BYTES = 1

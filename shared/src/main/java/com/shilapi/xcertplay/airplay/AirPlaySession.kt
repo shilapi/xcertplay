@@ -62,7 +62,7 @@ class AirPlaySession(
     private val media: AirPlayMediaHandler,
 ) : Closeable {
     internal val pairSetup = PairSetup(identity, pairings)
-    internal val pairVerify = PairVerify(identity, pairings)
+    internal val pairVerify = PairVerify(identity, pairings) { message -> debugLog(message) }
     internal var cipher: ControlCipher? = null
     internal var encBuf = ByteArray(0)
     internal var deviceBtMac = ""
@@ -70,9 +70,12 @@ class AirPlaySession(
 
     private val closed = AtomicBoolean(false)
     private val notified = AtomicBoolean(false)
+    private val sessionActiveNotified = AtomicBoolean(false)
     private var eventServer: ServerSocket? = null
-    private var eventSocket: Socket? = null
-    private var eventCipher: ControlCipher? = null
+    // Written by the event-accept thread, read by the control thread; both sides now hold
+    // `eventWriteLock`, and the volatile qualifier covers the reads outside it.
+    @Volatile private var eventSocket: Socket? = null
+    @Volatile private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
     private var pendingNightMode: Boolean? = null
     private val firstTouchSendLogged = AtomicBoolean(false)
@@ -144,8 +147,16 @@ class AirPlaySession(
     }
 
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
+        // Normalised coordinates can arrive outside [0, 1]: a drag that left the view, a stale
+        // layout, or a value from the peer. Multiplying that out would put the report outside the
+        // panel, so clamp instead of forwarding a coordinate the controller cannot act on.
+        val maxX = maxOf(0.0, (config.main.widthPixels - 1).toDouble())
+        val maxY = maxOf(0.0, (config.main.heightPixels - 1).toDouble())
         val scaled = contacts.map {
-            it.copy(x = it.x * config.main.widthPixels, y = it.y * config.main.heightPixels)
+            it.copy(
+                x = (it.x * config.main.widthPixels).coerceIn(0.0, maxX),
+                y = (it.y * config.main.heightPixels).coerceIn(0.0, maxY),
+            )
         }
         val report = AirPlayHid.touchReport(scaled)
         val sent = sendHidReport(AirPlayHid.TOUCH_HID_UID, report)
@@ -271,6 +282,13 @@ class AirPlaySession(
                     plaintext = decrypted.data
                 }
                 accumulated += plaintext
+                // A peer that never terminates its request headers, or that declares a huge
+                // Content-Length, would otherwise grow this buffer without bound. The largest
+                // legitimate control request is a few kilobytes, so this is a generous ceiling.
+                if (accumulated.size > MAX_PENDING_REQUEST_BYTES) {
+                    closeReason = "control request exceeded $MAX_PENDING_REQUEST_BYTES bytes"
+                    break
+                }
                 val parsed = RtspMessage.parseMessages(accumulated)
                 accumulated = parsed.rest
                 for (request in parsed.messages) {
@@ -323,16 +341,23 @@ class AirPlaySession(
     }
 
     private fun handle(request: RtspMessage.Request): RtspMessage.Response {
+        val path = request.path.lowercase()
+        // The AirPlay bring-up serves /info, /auth-setup, /pair-setup and /pair-verify before the
+        // controller is verified, so those stay open. Everything below allocates session resources
+        // or carries controller input and is refused until pair-verify has completed.
+        if (!pairVerify.isVerified && requiresVerifiedController(request.method, path)) {
+            debugLog("airplay refused ${request.method} ${request.path}: pair-verify has not completed")
+            return RtspMessage.Response(status = 403)
+        }
         when (request.method) {
             "SETUP" -> return handleSetup(request)
             "RECORD" -> {
-                listener.onSessionActive(this)
+                if (sessionActiveNotified.compareAndSet(false, true)) listener.onSessionActive(this)
                 return RtspMessage.Response(status = 200)
             }
             "TEARDOWN" -> return handleTeardown(request)
         }
 
-        val path = request.path.lowercase()
         return when {
             path.endsWith("/pair-setup") -> RtspMessage.Response(
                 headers = mapOf("Content-Type" to PAIRING_CONTENT_TYPE),
@@ -383,6 +408,22 @@ class AirPlaySession(
             }
             else -> RtspMessage.Response(status = 200)
         }
+    }
+
+    /**
+     * True for the routes that must not be served before pair-verify completes.
+     *
+     * `/info`, `/auth-setup`, `/pair-setup` and `/pair-verify` are deliberately excluded because the
+     * AirPlay bring-up requests them beforehand; unknown paths are excluded too so this cannot
+     * refuse a route this stack does not model. The set below is exactly the surface that allocates
+     * session resources (SETUP/TEARDOWN) or carries controller input (RECORD, /command, /feedback).
+     */
+    private fun requiresVerifiedController(method: String, path: String): Boolean = when {
+        method == "SETUP" -> true
+        method == "RECORD" -> true
+        method == "TEARDOWN" -> true
+        method == "POST" && (path.endsWith("/command") || path.endsWith("/feedback")) -> true
+        else -> false
     }
 
     private fun notifySetupResponseSent() {
@@ -516,21 +557,26 @@ class AirPlaySession(
     }
 
     private fun handleTeardown(request: RtspMessage.Request): RtspMessage.Response {
-        var decodedBody: Any? = null
-        val types = try {
-            val decoded = BplistCodec.decode(request.body)
-            decodedBody = decoded
-            val dict = asMap(decoded)
-            (dict?.get("streams") as? List<*>)
-                ?.mapNotNull { entry -> long(asMap(entry)?.get("type"))?.toInt() }
-                ?: emptyList()
-        } catch (_: Exception) {
-            emptyList()
+        // An absent body means "tear the session down"; a body that is present but unreadable is
+        // not the same thing. Collapsing the two would let one corrupt body clear every stream,
+        // so an undecodable body is refused rather than guessed at.
+        val decoded = if (request.body.isEmpty()) {
+            null
+        } else {
+            try {
+                BplistCodec.decode(request.body)
+            } catch (_: Exception) {
+                Log.w(TAG, "airplay TEARDOWN body could not be decoded; refusing")
+                return RtspMessage.Response(status = 400)
+            }
         }
+        val types = (asMap(decoded)?.get("streams") as? List<*>)
+            ?.mapNotNull { entry -> long(asMap(entry)?.get("type"))?.toInt() }
+            ?: emptyList()
 
         debugLog(
             "airplay TEARDOWN types=$types activeBefore=$activeStreams " +
-                "body=${request.body.size} bytes payload=$decodedBody",
+                "body=${request.body.size} bytes payload=$decoded",
         )
         trace("airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHex()}")
 
@@ -599,7 +645,16 @@ class AirPlaySession(
             val socket = server.accept()
             socket.setSoLinger(true, 0)
             debugLog("airplay event connection accepted from ${socket.remoteSocketAddress}")
-            eventSocket = socket
+            // Only a controller that completed pair-verify may use the event channel. A non-null
+            // shared secret is not sufficient: pair-verify message 1 already produces one, and the
+            // peer derives it from a key pair it generated itself, so gating on it let an unpaired
+            // peer take over the HID and event traffic.
+            if (!pairVerify.isVerified) {
+                Log.e(TAG, "airplay event rejected: pair-verify has not completed")
+                safeClose(socket)
+                close()
+                return
+            }
             val shared = pairVerify.shared
             if (shared == null) {
                 Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
@@ -619,8 +674,9 @@ class AirPlaySession(
                 "Events-Read-Encryption-Key".asciiBytes(),
                 32,
             )
-            eventCipher = ControlCipher(readKey, writeKey)
             synchronized(eventWriteLock) {
+                eventSocket = socket
+                eventCipher = ControlCipher(readKey, writeKey)
                 sendPendingNightModeLocked()
             }
             runEventRead(socket)
@@ -652,6 +708,12 @@ class AirPlaySession(
                 }
                 encrypted = decrypted.rest
                 plaintext += decrypted.data
+                // A peer that never terminates its request headers would otherwise grow this
+                // buffer without bound. No legitimate event request approaches the limit.
+                if (plaintext.size > MAX_PENDING_REQUEST_BYTES) {
+                    Log.e(TAG, "airplay event request exceeded $MAX_PENDING_REQUEST_BYTES bytes")
+                    break
+                }
                 val parsed = RtspMessage.parseMessages(plaintext)
                 plaintext = parsed.rest
                 for (message in parsed.messages) {
@@ -675,8 +737,10 @@ class AirPlaySession(
             if (!closed.get()) Log.e(TAG, "airplay event read failed", error)
         } finally {
             debugLog("airplay event connection closed")
-            if (eventSocket === socket) eventSocket = null
-            eventCipher = null
+            synchronized(eventWriteLock) {
+                if (eventSocket === socket) eventSocket = null
+                eventCipher = null
+            }
             safeClose(socket)
             if (!closed.get()) close()
         }
@@ -704,6 +768,9 @@ class AirPlaySession(
         const val READ_CHUNK_BYTES = 16 * 1024
         const val EVENT_READY_POLL_MILLIS = 25L
         const val NANOS_PER_MILLISECOND = 1_000_000L
+
+        /** Ceiling on a partially received control or event request. */
+        const val MAX_PENDING_REQUEST_BYTES = 1024 * 1024
     }
 }
 
