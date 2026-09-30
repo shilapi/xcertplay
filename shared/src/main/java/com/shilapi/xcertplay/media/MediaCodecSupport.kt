@@ -34,63 +34,76 @@ object MediaCodecSupport {
 
         var cursor = HEVC_ARRAY_COUNT_OFFSET
         val arrayCount = codecData[cursor++].toInt() and 0xff
-        val output = ByteArrayOutputStream()
+        val sets = sortedMapOf<Int, MutableList<ByteArray>>()
         repeat(arrayCount) {
-            if (cursor >= codecData.size) return ByteArray(0)
-            cursor += 1 // array_completeness, reserved, and nal_unit_type
-            if (cursor + 2 > codecData.size) return ByteArray(0)
-            val nalUnitCount = readU16Be(codecData, cursor)
+            if (cursor + 3 > codecData.size) return ByteArray(0)
+            val type = codecData[cursor++].toInt() and 0x3f
+            val count = readU16Be(codecData, cursor)
             cursor += 2
-            repeat(nalUnitCount) {
+            repeat(count) {
                 if (cursor + 2 > codecData.size) return ByteArray(0)
-                val nalUnitLength = readU16Be(codecData, cursor)
+                val length = readU16Be(codecData, cursor)
                 cursor += 2
-                if (cursor + nalUnitLength > codecData.size) return ByteArray(0)
-                output.write(START_CODE)
-                output.write(codecData, cursor, nalUnitLength)
-                cursor += nalUnitLength
+                if (length < 2 || length > codecData.size - cursor) return ByteArray(0)
+                if (((codecData[cursor].toInt() ushr 1) and 0x3f) != type ||
+                    codecData[cursor].toInt() and 0x80 != 0 ||
+                    codecData[cursor + 1].toInt() and 7 == 0
+                ) return ByteArray(0)
+                if (type in 32..34 || type == 39 || type == 40) {
+                    sets.getOrPut(type) { mutableListOf() }.add(codecData.copyOfRange(cursor, cursor + length))
+                }
+                cursor += length
             }
+        }
+        if ((32..34).any { sets[it].isNullOrEmpty() }) return ByteArray(0)
+        return ByteArrayOutputStream().apply {
+            sets.values.flatten().forEach { write(START_CODE); write(it) }
+        }.toByteArray()
+    }
+
+    /** Converts a complete access unit; never feeds a valid prefix of a damaged picture. */
+    fun toAnnexB(
+        lengthPrefixed: ByteArray,
+        lengthSize: Int = 4,
+        allowAnnexB: Boolean = true,
+    ): ByteArray {
+        if (allowAnnexB && startCodeSize(lengthPrefixed, 0) != 0) return lengthPrefixed
+        if (lengthSize !in listOf(1, 2, 4)) return ByteArray(0)
+        var cursor = 0
+        val output = ByteArrayOutputStream()
+        while (cursor < lengthPrefixed.size) {
+            if (lengthSize > lengthPrefixed.size - cursor) return ByteArray(0)
+            var length = 0L
+            repeat(lengthSize) { length = (length shl 8) or (lengthPrefixed[cursor++].toLong() and 255) }
+            if (length <= 0 || length > lengthPrefixed.size - cursor) return ByteArray(0)
+            output.write(START_CODE)
+            output.write(lengthPrefixed, cursor, length.toInt())
+            cursor += length.toInt()
         }
         return output.toByteArray()
     }
 
-    /** Converts CarPlay's length-prefixed NAL units into an Annex B byte stream. */
-    fun toAnnexB(lengthPrefixed: ByteArray): ByteArray {
-        if (lengthPrefixed.size >= 4 &&
-            lengthPrefixed[0] == 0.toByte() &&
-            lengthPrefixed[1] == 0.toByte() &&
-            lengthPrefixed[2] == 0.toByte() &&
-            lengthPrefixed[3] == 1.toByte()
-        ) {
-            return lengthPrefixed
+    /** Raw NAL units from either three- or four-byte Annex B start codes. */
+    fun annexBNalUnits(bytes: ByteArray): List<ByteArray> {
+        if (startCodeSize(bytes, 0) == 0) return emptyList()
+        val units = mutableListOf<ByteArray>()
+        var cursor = 0
+        while (cursor < bytes.size) {
+            val prefix = startCodeSize(bytes, cursor)
+            if (prefix == 0) return emptyList()
+            val start = cursor + prefix
+            cursor = start
+            while (cursor < bytes.size && startCodeSize(bytes, cursor) == 0) cursor++
+            if (cursor == start) return emptyList()
+            units.add(bytes.copyOfRange(start, cursor))
         }
+        return units
+    }
 
-        var inputOffset = 0
-        var outputSize = 0
-        while (inputOffset + 4 <= lengthPrefixed.size) {
-            val length = readU32Be(lengthPrefixed, inputOffset)
-            inputOffset += 4
-            if (length <= 0 || inputOffset + length > lengthPrefixed.size) break
-            if (length > Int.MAX_VALUE - outputSize - START_CODE.size) break
-            outputSize += START_CODE.size + length
-            inputOffset += length
-        }
-        if (outputSize == 0) return ByteArray(0)
-
-        val output = ByteArray(outputSize)
-        var offset = 0
-        var outputOffset = 0
-        while (offset + 4 <= lengthPrefixed.size) {
-            val length = readU32Be(lengthPrefixed, offset)
-            offset += 4
-            if (length <= 0 || offset + length > lengthPrefixed.size) break
-            START_CODE.copyInto(output, outputOffset)
-            outputOffset += START_CODE.size
-            lengthPrefixed.copyInto(output, outputOffset, offset, offset + length)
-            outputOffset += length
-            offset += length
-        }
-        return output
+    private fun startCodeSize(bytes: ByteArray, offset: Int): Int {
+        if (offset + 3 > bytes.size || bytes[offset] != 0.toByte() || bytes[offset + 1] != 0.toByte()) return 0
+        if (bytes[offset + 2] == 1.toByte()) return 3
+        return if (offset + 4 <= bytes.size && bytes[offset + 2] == 0.toByte() && bytes[offset + 3] == 1.toByte()) 4 else 0
     }
 
     /** Wraps one raw AAC-LC access unit in an MPEG-4 ADTS frame. */
@@ -159,12 +172,6 @@ object MediaCodecSupport {
 
     private fun readU16Be(source: ByteArray, offset: Int): Int =
         ((source[offset].toInt() and 0xff) shl 8) or (source[offset + 1].toInt() and 0xff)
-
-    private fun readU32Be(source: ByteArray, offset: Int): Int =
-        ((source[offset].toInt() and 0xff) shl 24) or
-            ((source[offset + 1].toInt() and 0xff) shl 16) or
-            ((source[offset + 2].toInt() and 0xff) shl 8) or
-            (source[offset + 3].toInt() and 0xff)
 
     private const val HEVC_FIXED_RECORD_SIZE = 23
     private const val HEVC_ARRAY_COUNT_OFFSET = 22

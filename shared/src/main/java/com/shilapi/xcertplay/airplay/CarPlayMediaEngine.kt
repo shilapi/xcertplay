@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 /** Rendering seam for the decrypted CarPlay media streams. */
 interface MediaSink {
     fun onVideoCodec(type: Int, codec: VideoCodec) {}
+    fun onVideoRecoveryHandler(type: Int, requestKeyFrame: (() -> Boolean)?) {}
     fun onVideoConfig(type: Int, codecData: ByteArray) {}
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
     fun onScreenStreamActive(type: Int, active: Boolean) {}
@@ -25,8 +26,8 @@ interface MediaSink {
 
 /**
  * Concrete [AirPlayMediaHandler] that binds the screen, audio and iAP2 DataStream ports,
- * decrypts their payloads, and hands decoded media to a [MediaSink]. Telephony and speech
- * streams can additionally return a PCM microphone uplink through the sink.
+ * decrypts their payloads, and hands decoded media to a [MediaSink]. Main audio streams can
+ * additionally return microphone audio when the phone supplies an input port.
  */
 class CarPlayMediaEngine(
     private val sink: MediaSink,
@@ -56,7 +57,8 @@ class CarPlayMediaEngine(
 
     private val streams = ConcurrentHashMap<StreamKey, Closeable>()
     private val audioMeta = ConcurrentHashMap<Int, AudioMeta>()
-    private val pendingMicrophone = ConcurrentHashMap<Int, MicrophoneConfig>()
+    private val pendingMicrophone = ConcurrentHashMap<StreamKey, MicrophoneConfig>()
+    private val startedMicrophone = ConcurrentHashMap.newKeySet<StreamKey>()
     private val audioCaptures = ConcurrentHashMap<Int, AudioPacketCapture>()
     private val pendingDataStreams = ConcurrentHashMap<AirPlaySession, MutableList<PendingDataStream>>()
     private val pendingLock = Any()
@@ -77,6 +79,13 @@ class CarPlayMediaEngine(
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
         val screen = ScreenStream(key)
+        // The no-display-UUID forceKeyFrame command targets the primary screen.
+        // Do not accidentally restart the main screen when the alternate decoder loses sync.
+        if (type == STREAM_TYPE_MAIN_SCREEN) {
+            sink.onVideoRecoveryHandler(type) {
+                session.sendCommand(mainScreenKeyFrameCommand())
+            }
+        }
         val port = screen.listen(
             object : ScreenStream.Listener {
                 override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
@@ -88,6 +97,7 @@ class CarPlayMediaEngine(
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
                     if (streams.remove(streamKey, screen)) {
+                        sink.onVideoRecoveryHandler(type, null)
                         sink.onScreenStreamActive(type, false)
                     }
                     session.close()
@@ -104,7 +114,7 @@ class CarPlayMediaEngine(
         streams.remove(streamKey)?.close()
         audioMeta.remove(type)
         audioCaptures.remove(type)?.close()
-        if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
+        stopMicrophone(streamKey)
         sink.onAudioStopped(type)
 
         val key = outputKey(session, stream) ?: return null
@@ -124,7 +134,7 @@ class CarPlayMediaEngine(
         val latencyMs = (stream["audioLatencyMs"] as? Number)?.toInt() ?: 0
         val meta = AudioMeta(type, format, connectionId, latencyMs)
         val microphone = microphoneConfig(session, type, stream, format)
-        if (microphone != null) pendingMicrophone[type] = microphone
+        if (microphone != null) pendingMicrophone[streamKey] = microphone
 
         val capture = audioCaptureDirectory?.let { AudioPacketCapture(it, type) }
         if (capture != null) audioCaptures[type] = capture
@@ -135,7 +145,6 @@ class CarPlayMediaEngine(
                     meta.firstSample = firstSample
                     meta.originNs = System.nanoTime()
                     sink.onAudioStarted(type, format, firstSample)
-                    microphone?.let { sink.onMicrophoneStarted(type, it) }
                 }
 
                 override fun onRtp(rtp: ByteArray, sample: Int) =
@@ -206,6 +215,11 @@ class CarPlayMediaEngine(
     }
 
     override fun onSetupResponseSent(session: AirPlaySession) {
+        pendingMicrophone.forEach { (key, config) ->
+            if (key.session === session && startedMicrophone.add(key)) {
+                sink.onMicrophoneStarted(key.type, config)
+            }
+        }
         takePendingDataStreams(session).forEach { pending ->
             val attached = try {
                 pending.attach()
@@ -252,25 +266,33 @@ class CarPlayMediaEngine(
 
     override fun onTeardown(session: AirPlaySession, type: Int) {
         if (type == STREAM_TYPE_DATA) clearPendingDataStreams(session)
-        if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
+        stopMicrophone(StreamKey(session, type))
         audioMeta.remove(type)
         audioCaptures.remove(type)?.close()
         sink.onAudioStopped(type)
         streams.keys
             .filter { it.session === session && it.type == type }
             .forEach { streams.remove(it)?.close() }
-        if (isScreenStreamType(type)) sink.onScreenStreamActive(type, false)
+        if (isScreenStreamType(type)) {
+            sink.onVideoRecoveryHandler(type, null)
+            sink.onScreenStreamActive(type, false)
+        }
     }
 
     override fun onSessionClosed(session: AirPlaySession) {
         clearPendingDataStreams(session)
+        pendingMicrophone.keys.filter { it.session === session }.forEach(::stopMicrophone)
         val sessionStreams = streams.keys.filter { it.session === session }
         sessionStreams
             .filter { isScreenStreamType(it.type) }
-            .forEach { sink.onScreenStreamActive(it.type, false) }
+            .forEach {
+                sink.onVideoRecoveryHandler(it.type, null)
+                sink.onScreenStreamActive(it.type, false)
+            }
         sessionStreams.forEach { streams.remove(it)?.close() }
+        sessionStreams.filter { it.type in STREAM_TYPE_MAIN_AUDIO..STREAM_TYPE_MAIN_HIGH_AUDIO }
+            .forEach { sink.onAudioStopped(it.type) }
         audioMeta.clear()
-        pendingMicrophone.clear()
         audioCaptures.values.forEach(AudioPacketCapture::close)
         audioCaptures.clear()
     }
@@ -301,36 +323,43 @@ class CarPlayMediaEngine(
         return dataStreamKey(session, stream, DATASTREAM_OUTPUT_KEY)
     }
 
+    private fun stopMicrophone(key: StreamKey) {
+        pendingMicrophone.remove(key)
+        if (startedMicrophone.remove(key)) sink.onMicrophoneStopped(key.type)
+    }
+
     private fun microphoneConfig(
         session: AirPlaySession,
         type: Int,
         stream: Map<String, Any?>,
         format: AudioFormat,
     ): MicrophoneConfig? {
-        if (!microphoneEnabled || type != STREAM_TYPE_MAIN_AUDIO) return null
-        if (format.audioType != "telephony" && format.audioType != "speechrecognition") return null
-        val port = (stream["dataPort"] as? Number)?.toInt() ?: return null
-        if (port !in 1..65535) return null
+        val port = requestedMicrophonePort(microphoneEnabled, type, stream) ?: return null
+        if (format.codec == AudioCodecKind.AAC_LC) {
+            Log.w(TAG, "microphone input requested with unsupported AAC-LC format")
+            return null
+        }
         val host = session.remoteAddress ?: return null
         val key = dataStreamKey(session, stream, DATASTREAM_INPUT_KEY) ?: return null
         val formatBits = (stream["audioFormat"] as? Number)?.toLong() ?: 0L
+        val micRate = if (format.codec == AudioCodecKind.OPUS) {
+            AudioStreamCodec.opusCaptureRate(formatBits)
+        } else {
+            format.sampleRate
+        }
         val framesPerPacket = (stream["framesPerPacket"] as? Number)?.toInt() ?: 0
         val frameMillis = if (format.codec == AudioCodecKind.OPUS) {
             20
         } else if (framesPerPacket > 0) {
-            Math.round(framesPerPacket * 1000.0 / format.sampleRate).toInt().coerceIn(5, 60)
+            Math.round(framesPerPacket * 1000.0 / micRate).toInt().coerceIn(5, 60)
         } else {
             20
         }
-        val opusBitrate = when {
-            formatBits and OPUS_48K != 0L -> 96_000
-            formatBits and OPUS_24K != 0L -> 64_000
-            else -> 48_000
-        }
+        val opusBitrate = if (micRate <= 24_000) 48_000 else 96_000
         return MicrophoneConfig(
             audioType = format.audioType,
-            sampleRate = format.sampleRate,
-            channels = format.channels,
+            sampleRate = micRate,
+            channels = if (format.codec == AudioCodecKind.OPUS) 1 else format.channels,
             payloadType = type,
             frameMillis = frameMillis,
             host = host,
@@ -364,12 +393,23 @@ class CarPlayMediaEngine(
         const val STREAM_TYPE_MAIN_SCREEN = 110
         const val STREAM_TYPE_ALT_SCREEN = 111
         const val STREAM_TYPE_MAIN_AUDIO = 100
+        const val STREAM_TYPE_MAIN_HIGH_AUDIO = 102
         const val STREAM_TYPE_DATA = 130
         const val DATASTREAM_OUTPUT_KEY = "DataStream-Output-Encryption-Key"
         const val DATASTREAM_INPUT_KEY = "DataStream-Input-Encryption-Key"
         const val OPUS_24K = 0x20000000L
         const val OPUS_48K = 0x40000000L
     }
+}
+
+/** The input port, rather than the downlink category, signals that the phone requests a mic. */
+internal fun requestedMicrophonePort(
+    microphoneEnabled: Boolean,
+    type: Int,
+    stream: Map<String, Any?>,
+): Int? {
+    if (!microphoneEnabled || type != 100) return null
+    return (stream["dataPort"] as? Number)?.toLong()?.takeIf { it in 1..65535 }?.toInt()
 }
 
 internal fun unsignedPlistDecimal(value: Any?): String? = when (value) {
@@ -386,3 +426,7 @@ internal fun unsignedPlistInteger(value: Any?): Any = when (value) {
     is Int -> if (value < 0) BigInteger(Integer.toUnsignedString(value)) else value
     else -> value ?: 0L
 }
+
+/** AirPlaySender carEndpoint_forceKeyFrame defaults to the primary stream with empty params. */
+internal fun mainScreenKeyFrameCommand(): Map<String, Any?> =
+    linkedMapOf("type" to "forceKeyFrame", "params" to emptyMap<String, Any?>())

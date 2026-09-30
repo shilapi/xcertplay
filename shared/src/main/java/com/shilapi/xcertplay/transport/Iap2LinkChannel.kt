@@ -9,24 +9,29 @@ import kotlin.math.min
  *
  * [open] starts one worker.  That worker is the only code that drives [Iap2LinkEngine] or calls
  * [BlockingDuplexByteStream.send]/[BlockingDuplexByteStream.recv].  Callers may concurrently wait
- * for readiness, queue complete session-10 payloads, receive session-10 payloads, or close this
- * channel.  This class owns and closes [underlying].
+ * for readiness, queue complete session payloads, receive control/file-transfer payloads, or close
+ * this channel. This class owns and closes [underlying].
  *
- * It deliberately does not parse CSM control messages or implement EA, file transfer, media, UI,
- * or any Lockdown setup.
+ * It deliberately does not parse CSM or file-transfer payloads, and does not implement EA, media,
+ * UI, or any Lockdown setup.
  */
 class Iap2LinkChannel private constructor(
     private val underlying: BlockingDuplexByteStream,
     private val linkConfig: Iap2LinkConfig,
     private val initiateNegotiation: Boolean,
 ) : AutoCloseable {
-    private data class Command(val control: ByteArray)
+    private data class Command(
+        val sessionId: Int,
+        val bytes: ByteArray,
+    )
 
     private val lock = Object()
     private val commands = ArrayDeque<Command>()
     private var commandBytes = 0
     private val controls = ArrayDeque<ByteArray>()
     private var controlBytes = 0
+    private val fileTransfers = ArrayDeque<ByteArray>()
+    private var fileTransferBytes = 0
 
     private var ready = false
     private var peerMaxControlPayloadBytes: Int? = null
@@ -67,7 +72,7 @@ class Iap2LinkChannel private constructor(
         val copy = bytes.copyOf()
         synchronized(lock) {
             if (terminated || closing) return false
-            return enqueueCommandLocked(copy)
+            return enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
         }
     }
 
@@ -87,7 +92,24 @@ class Iap2LinkChannel private constructor(
             }
             throwTerminalFailureLocked()
             if (terminated || closing) return false
-            return enqueueCommandLocked(copy)
+            return enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
+        }
+    }
+
+    /** Queues one file-transfer-session datagram, waiting for bounded queue capacity. */
+    internal fun sendFileTransferAwaitCapacity(bytes: ByteArray, timeoutMillis: Long): Boolean {
+        require(bytes.size <= Iap2LinkEngine.MAX_PAYLOAD_BYTES) {
+            "iAP2 file-transfer payload exceeds ${Iap2LinkEngine.MAX_PAYLOAD_BYTES} bytes"
+        }
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        val copy = bytes.copyOf()
+        synchronized(lock) {
+            waitFor(timeoutMillis) {
+                terminated || closing || hasCommandCapacityLocked(copy.size)
+            }
+            throwTerminalFailureLocked()
+            if (terminated || closing) return false
+            return enqueueCommandLocked(Iap2LinkEngine.FILE_TRANSFER_SESSION_ID, copy)
         }
     }
 
@@ -100,6 +122,19 @@ class Iap2LinkChannel private constructor(
             if (controls.isEmpty()) return null
             val bytes = controls.removeFirst()
             controlBytes -= bytes.size
+            return bytes
+        }
+    }
+
+    /** Returns the next session-12 datagram, or null on timeout or clean close. */
+    internal fun recvFileTransfer(timeoutMillis: Long): ByteArray? {
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        synchronized(lock) {
+            waitFor(timeoutMillis) { fileTransfers.isNotEmpty() || terminated }
+            throwTerminalFailureLocked()
+            if (fileTransfers.isEmpty()) return null
+            val bytes = fileTransfers.removeFirst()
+            fileTransferBytes -= bytes.size
             return bytes
         }
     }
@@ -180,12 +215,15 @@ class Iap2LinkChannel private constructor(
                     null
                 } else {
                     commands.removeFirst().also {
-                        commandBytes -= it.control.size
+                        commandBytes -= it.bytes.size
                         lock.notifyAll()
                     }
                 }
             } ?: return
-            engine.sendControl(command.control, nowMillis())
+            when (command.sessionId) {
+                Iap2LinkEngine.CONTROL_SESSION_ID -> engine.sendControl(command.bytes, nowMillis())
+                Iap2LinkEngine.FILE_TRANSFER_SESSION_ID -> engine.sendFileTransfer(command.bytes, nowMillis())
+            }
             if (isClosing()) return
         }
     }
@@ -227,6 +265,25 @@ class Iap2LinkChannel private constructor(
                     }
                 }
 
+                is Iap2LinkEngine.Event.FileTransfer -> {
+                    val overflow = synchronized(lock) {
+                        if (fileTransfers.size >= MAX_PENDING_FILE_TRANSFERS ||
+                            event.bytes.size > MAX_PENDING_FILE_TRANSFER_BYTES - fileTransferBytes
+                        ) {
+                            true
+                        } else {
+                            fileTransfers += event.bytes
+                            fileTransferBytes += event.bytes.size
+                            lock.notifyAll()
+                            false
+                        }
+                    }
+                    if (overflow) {
+                        finish(IOException("iAP2 received file-transfer queue limit exceeded"))
+                        return false
+                    }
+                }
+
                 is Iap2LinkEngine.Event.Dead -> {
                     finish(IOException(event.reason ?: "iAP2 link ended"))
                     return false
@@ -261,6 +318,8 @@ class Iap2LinkChannel private constructor(
         commandBytes = 0
         controls.clear()
         controlBytes = 0
+        fileTransfers.clear()
+        fileTransferBytes = 0
         terminalFailure = combineFailures(terminalFailure, failure)
         lock.notifyAll()
     }
@@ -290,9 +349,9 @@ class Iap2LinkChannel private constructor(
         commands.size < MAX_PENDING_COMMANDS && bytes <= MAX_PENDING_COMMAND_BYTES - commandBytes
 
     /** lock must already be held. */
-    private fun enqueueCommandLocked(bytes: ByteArray): Boolean {
+    private fun enqueueCommandLocked(sessionId: Int, bytes: ByteArray): Boolean {
         if (!hasCommandCapacityLocked(bytes.size)) return false
-        commands += Command(bytes)
+        commands += Command(sessionId, bytes)
         commandBytes += bytes.size
         lock.notifyAll()
         return true
@@ -338,6 +397,8 @@ class Iap2LinkChannel private constructor(
         private const val MAX_PENDING_COMMAND_BYTES = 1_048_576
         private const val MAX_PENDING_CONTROLS = 64
         private const val MAX_PENDING_CONTROL_BYTES = 1_048_576
+        private const val MAX_PENDING_FILE_TRANSFERS = 256
+        private const val MAX_PENDING_FILE_TRANSFER_BYTES = 16 * 1_048_576
 
         private val WIRED_LINK_CONFIG = Iap2LinkConfig(
             maxOutgoing = 4,

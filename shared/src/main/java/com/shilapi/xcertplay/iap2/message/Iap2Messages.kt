@@ -281,7 +281,7 @@ object Iap2ControlMessages {
                 listOf(1, 4, 6, 12, 26).forEach(::void)
             }
             group(1) {
-                listOf(0, 1, 7).forEach(::void)
+                listOf(0, 1, 2, 3, 7).forEach(::void)
             }
         },
         Iap2Messages.build(Iap2Endpoints.START_ROUTE_GUIDANCE_UPDATES) {},
@@ -311,4 +311,167 @@ object Iap2ControlMessages {
             string(0, nmeaSentence)
         }
     }
+}
+
+enum class Iap2PlaybackStatus(val wireValue: Int) {
+    STOPPED(0),
+    PLAYING(1),
+    PAUSED(2),
+    SEEKING_FORWARD(3),
+    SEEKING_BACKWARD(4),
+    UNKNOWN(-1),
+    ;
+
+    companion object {
+        fun fromWire(value: Int): Iap2PlaybackStatus =
+            entries.firstOrNull { it.wireValue == value } ?: UNKNOWN
+    }
+}
+
+/** Last complete NowPlaying state reconstructed from incremental 0x5001 updates. */
+data class Iap2NowPlayingState(
+    val title: String? = null,
+    val durationMillis: Long? = null,
+    val album: String? = null,
+    val artist: String? = null,
+    val status: Iap2PlaybackStatus = Iap2PlaybackStatus.STOPPED,
+    val elapsedMillis: Long = 0,
+    val queueIndex: Long? = null,
+    val queueCount: Long? = null,
+    val appName: String? = null,
+    val positionUpdateRealtimeMillis: Long = 0,
+    /** Artwork file-transfer identifier; fetching the artwork itself needs an iAP2 file transfer session. */
+    val artworkFileTransferId: Int? = null,
+)
+
+/** Merges fields because iAP2 omits attributes whose value did not change. */
+class Iap2NowPlayingAccumulator(
+    private val realtimeMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+) {
+    private var current = Iap2NowPlayingState()
+
+    @Synchronized
+    fun update(frame: Iap2Frame): Iap2NowPlayingState {
+        require(frame.messageId == NOW_PLAYING_UPDATE) {
+            "Expected NowPlayingUpdate, got 0x${frame.messageId.toString(16)}"
+        }
+        val body = Iap2Messages.reader(frame)
+        body.optionalGroup(MEDIA_ITEM_ATTRIBUTES)?.let { media ->
+            current = current.copy(
+                title = if (media.has(TITLE)) media.string(TITLE) else current.title,
+                durationMillis = if (media.has(DURATION)) media.u32(DURATION) else current.durationMillis,
+                album = if (media.has(ALBUM)) media.string(ALBUM) else current.album,
+                artist = if (media.has(ARTIST)) media.string(ARTIST) else current.artist,
+                artworkFileTransferId = if (media.has(ARTWORK_FILE_TRANSFER_ID)) {
+                    media.u8(ARTWORK_FILE_TRANSFER_ID)
+                } else {
+                    current.artworkFileTransferId
+                },
+            )
+        }
+        body.optionalGroup(PLAYBACK_ATTRIBUTES)?.let { playback ->
+            val statusChanged = playback.has(PLAYBACK_STATUS)
+            val elapsedChanged = playback.has(ELAPSED_TIME)
+            val updateTime = if (statusChanged || elapsedChanged) realtimeMillis() else null
+            val elapsedAtUpdate = if (
+                statusChanged &&
+                !elapsedChanged &&
+                current.status == Iap2PlaybackStatus.PLAYING &&
+                current.positionUpdateRealtimeMillis > 0
+            ) {
+                current.elapsedMillis +
+                    (checkNotNull(updateTime) - current.positionUpdateRealtimeMillis).coerceAtLeast(0)
+            } else {
+                current.elapsedMillis
+            }
+            current = current.copy(
+                status = if (statusChanged) {
+                    Iap2PlaybackStatus.fromWire(playback.u8(PLAYBACK_STATUS))
+                } else {
+                    current.status
+                },
+                elapsedMillis = if (elapsedChanged) playback.u32(ELAPSED_TIME) else elapsedAtUpdate,
+                queueIndex = if (playback.has(QUEUE_INDEX)) playback.u32(QUEUE_INDEX) else current.queueIndex,
+                queueCount = if (playback.has(QUEUE_COUNT)) playback.u32(QUEUE_COUNT) else current.queueCount,
+                appName = if (playback.has(APP_NAME)) playback.string(APP_NAME) else current.appName,
+                positionUpdateRealtimeMillis = updateTime ?: current.positionUpdateRealtimeMillis,
+            )
+        }
+        return current
+    }
+
+    private companion object {
+        const val NOW_PLAYING_UPDATE = 0x5001
+        const val MEDIA_ITEM_ATTRIBUTES = 0
+        const val PLAYBACK_ATTRIBUTES = 1
+        const val TITLE = 1
+        const val DURATION = 4
+        const val ALBUM = 6
+        const val ARTIST = 12
+        const val ARTWORK_FILE_TRANSFER_ID = 26
+        const val PLAYBACK_STATUS = 0
+        const val ELAPSED_TIME = 1
+        const val QUEUE_INDEX = 2
+        const val QUEUE_COUNT = 3
+        const val APP_NAME = 7
+    }
+}
+
+enum class Iap2MediaRemoteCommand(val reportMask: Int) {
+    PLAY(1),
+    PAUSE(2),
+    NEXT(4),
+    PREVIOUS(8),
+}
+
+/** iAP2 HID Media Playback Remote messages (0x6800/0x6802/0x6803). */
+object Iap2HidMessages {
+    const val MEDIA_PLAYBACK_COMPONENT_ID = 0
+
+    fun startMediaPlaybackRemote(
+        vendorIdentifier: Int = 2,
+        productIdentifier: Int = 1,
+    ): Iap2Frame = Iap2Messages.buildRaw(START_HID) {
+        u16(0, MEDIA_PLAYBACK_COMPONENT_ID)
+        u16(1, vendorIdentifier)
+        u16(2, productIdentifier)
+        bytes(4, MEDIA_PLAYBACK_DESCRIPTOR)
+    }
+
+    fun mediaReport(command: Iap2MediaRemoteCommand): Iap2Frame =
+        accessoryReport(byteArrayOf(command.reportMask.toByte()))
+
+    fun releaseMediaButtons(): Iap2Frame = accessoryReport(byteArrayOf(0))
+
+    fun stopMediaPlaybackRemote(): Iap2Frame = Iap2Messages.buildRaw(STOP_HID) {
+        u16(0, MEDIA_PLAYBACK_COMPONENT_ID)
+    }
+
+    private fun accessoryReport(report: ByteArray): Iap2Frame =
+        Iap2Messages.buildRaw(ACCESSORY_HID_REPORT) {
+            u16(0, MEDIA_PLAYBACK_COMPONENT_ID)
+            bytes(1, report)
+        }
+
+    private const val START_HID = 0x6800
+    private const val ACCESSORY_HID_REPORT = 0x6802
+    private const val STOP_HID = 0x6803
+    private val MEDIA_PLAYBACK_DESCRIPTOR = byteArrayOf(
+        0x05, 0x0c, // Usage Page (Consumer)
+        0x09, 0x01, // Usage (Consumer Control)
+        0xa1.toByte(), 0x01, // Collection (Application)
+        0x15, 0x00, // Logical Minimum (0)
+        0x25, 0x01, // Logical Maximum (1)
+        0x75, 0x01, // Report Size (1)
+        0x95.toByte(), 0x04, // Report Count (4)
+        0x09, 0xb0.toByte(), // Play
+        0x09, 0xb1.toByte(), // Pause
+        0x09, 0xb5.toByte(), // Scan Next Track
+        0x09, 0xb6.toByte(), // Scan Previous Track
+        0x81.toByte(), 0x02, // Input (Data, Variable, Absolute)
+        0x75, 0x04, // Report Size (4)
+        0x95.toByte(), 0x01, // Report Count (1)
+        0x81.toByte(), 0x03, // Input (Constant, Variable, Absolute)
+        0xc0.toByte(), // End Collection
+    )
 }

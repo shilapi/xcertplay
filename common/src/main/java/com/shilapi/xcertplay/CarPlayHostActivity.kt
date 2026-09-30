@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -11,11 +12,14 @@ import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -30,14 +34,17 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,6 +71,8 @@ import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
+import com.shilapi.xcertplay.media.MicrophoneGain
+import com.shilapi.xcertplay.media.MicrophoneLevelMonitor
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -110,14 +119,17 @@ class CarPlayHostActivity : ComponentActivity() {
         } else {
             emptyList()
         },
-        ch341MfiResetGpio = if (mfiTarget == MfiTarget.USB_CH341) {
-            0 // CH341 D0/CS0 -> open-drain MFi RST
-        } else {
-            null
-        },
+        // The CP latches its I2C address from the RST level at its own power-up, so the host must
+        // not pulse RST before discovery. Driving D0 re-latches the part onto the alternate
+        // address (0x10), where the accessory certificate is not readable. Leave RST at its
+        // hardware pull (VCC -> 0x11) and let the scanner find the part with its certificate.
+        // Set this back to 0 to restore the D0 pulse.
+        ch341MfiResetGpio = null,
         linuxI2cPath = if (mfiTarget == MfiTarget.I2C) mfiI2cPath.trim() else null,
         remoteMfiServer = remoteMfiServer.trim().takeIf { it.isNotEmpty() },
         remoteMfiToken = remoteMfiToken.takeIf { it.isNotEmpty() },
+        localMfiCertificateUri = localMfiCertificateUri.takeIf { it.isNotEmpty() },
+        localMfiPrivateKeyUri = localMfiPrivateKeyUri.takeIf { it.isNotEmpty() },
         identification = Iap2IdentificationConfig(
             name = "xcertplay",
             modelIdentifier = normalizedModel(),
@@ -167,7 +179,10 @@ class CarPlayHostActivity : ComponentActivity() {
             microphoneAvailable = granted
             microphonePermissionResolved = true
             appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
+            val startGainTest = granted && microphoneGainTestAfterPermission && menuOpen
+            microphoneGainTestAfterPermission = false
             requestStartupPrerequisites()
+            if (startGainTest) startMicrophoneGainTest()
         }
     private val locationPermission =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -218,21 +233,50 @@ class CarPlayHostActivity : ComponentActivity() {
                 appendLog("Custom AirPlay icon updated")
             }
         }
+    private val localMfiCertificatePicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            externalActivityInProgress = false
+            if (uri != null && retainDocumentReadPermission(uri, "certificate")) {
+                localMfiCertificateUri = uri.toString()
+                updateLocalMfiDocumentViews()
+                mfiErrorView?.visibility = View.GONE
+            }
+        }
+    private val localMfiPrivateKeyPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            externalActivityInProgress = false
+            if (uri != null && retainDocumentReadPermission(uri, "private key")) {
+                localMfiPrivateKeyUri = uri.toString()
+                updateLocalMfiDocumentViews()
+                mfiErrorView?.visibility = View.GONE
+            }
+        }
 
     private var videoView: TextureView? = null
     private var clusterContainer: FrameLayout? = null
     private var clusterView: TextureView? = null
     private var gestureOverlay: View? = null
+    private var disconnectedSettingsButton: View? = null
     private var settingsMenu: View? = null
     private var mfiTargetGroup: RadioGroup? = null
     private var mfiI2cFields: View? = null
     private var mfiRemoteFields: View? = null
+    private var mfiLocalFields: View? = null
     private var mfiErrorView: TextView? = null
     private var mfiI2cPathInput: EditText? = null
     private var remoteMfiServerInput: EditText? = null
     private var remoteMfiTokenInput: EditText? = null
+    private var localMfiCertificateDocumentView: TextView? = null
+    private var localMfiPrivateKeyDocumentView: TextView? = null
     private var settingsBaseline: SettingsBaseline? = null
     private var locationReportingSwitch: Switch? = null
+    private var microphoneGainSeekBar: SeekBar? = null
+    private var microphoneGainValueView: TextView? = null
+    private var microphoneTestButton: Button? = null
+    private var microphoneLevelBar: ProgressBar? = null
+    private var microphoneLevelValueView: TextView? = null
+    private var microphoneLevelMonitor: MicrophoneLevelMonitor? = null
+    private var microphoneGainTestAfterPermission = false
     private var statusView: TextView? = null
     private var statusScrollView: ScrollView? = null
     private var stageStatusView: TextView? = null
@@ -263,7 +307,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var ultraEnabled = false
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
-    private var debugLogsEnabled = false
+    @Volatile private var debugLogsEnabled = false
+    private var moreGesturesToSettings = false
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -281,11 +326,14 @@ class CarPlayHostActivity : ComponentActivity() {
     private var locationPermissionAvailable = false
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
+    @Volatile private var microphoneGainPercent = MicrophoneGain.DEFAULT_PERCENT
     private var wirelessEnabled = false
     private var mfiTarget = MfiTarget.USB_CH341
     private var mfiI2cPath = AirPlayPersistence.DEFAULT_MFI_I2C_PATH
     private var remoteMfiServer = ""
     private var remoteMfiToken = ""
+    private var localMfiCertificateUri = ""
+    private var localMfiPrivateKeyUri = ""
     private var wirelessPermissionsReady = false
     private var wirelessHotspotMode = WirelessHotspotMode.WIFI_P2P
     private var manualHotspotSsid = ""
@@ -312,12 +360,35 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureTracking = false
     private var gestureStartX = 0f
     private var gestureStartY = 0f
+    private var edgeSettingsGestureCaptured = false
+    private var edgeSettingsGestureEligible = false
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val logLines = ArrayDeque<LogEntry>()
+    private val logLines = ScreenLogBuffer(MAX_SCREEN_LOG_LINES)
+    private val pendingScreenLogs = ArrayDeque<PendingLog>()
+    private val pendingScreenLogsLock = Any()
+    private var screenDrainPosted = false
+    private val drainScreenLogs = Runnable {
+        val pending = synchronized(pendingScreenLogsLock) {
+            screenDrainPosted = false
+            pendingScreenLogs.toList().also { pendingScreenLogs.clear() }
+        }
+        if (debugLogsEnabled && !menuOpen) {
+            pending.forEach { entry ->
+                if (entry.generation == restartGeneration) {
+                    appendScreenLog(entry.timestampMillis, entry.message)
+                }
+            }
+        }
+    }
     private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
+    private var logRenderScheduled = false
+    private val renderLogLines = Runnable {
+        logRenderScheduled = false
+        refreshLogView(System.currentTimeMillis())
+    }
     private val applyDisplaySize = Runnable {
         val size = pendingDisplaySize ?: return@Runnable
         pendingDisplaySize = null
@@ -474,7 +545,9 @@ class CarPlayHostActivity : ComponentActivity() {
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
+        microphoneGainPercent = AirPlayPersistence.loadMicrophoneGainPercent(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
+        moreGesturesToSettings = AirPlayPersistence.loadMoreGesturesToSettings(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         manufacturer = AirPlayPersistence.loadManufacturer(this)
         model = AirPlayPersistence.loadModel(this)
@@ -497,6 +570,8 @@ class CarPlayHostActivity : ComponentActivity() {
         mfiI2cPath = AirPlayPersistence.loadMfiI2cPath(this)
         remoteMfiServer = AirPlayPersistence.loadRemoteMfiServer(this)
         remoteMfiToken = AirPlayPersistence.loadRemoteMfiToken(this)
+        localMfiCertificateUri = AirPlayPersistence.loadLocalMfiCertificateUri(this)
+        localMfiPrivateKeyUri = AirPlayPersistence.loadLocalMfiPrivateKeyUri(this)
         wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
         manualHotspotSsid = AirPlayPersistence.loadManualHotspotSsid(this)
         manualHotspotPassphrase = AirPlayPersistence.loadManualHotspotPassphrase(this)
@@ -597,6 +672,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        stopMicrophoneGainTest()
         // The controller, USB/iAP2 link, and VPN attachment intentionally outlive the UI.
         super.onStop()
     }
@@ -618,8 +694,11 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        stopMicrophoneGainTest()
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
+        mainHandler.removeCallbacks(renderLogLines)
+        mainHandler.removeCallbacks(drainScreenLogs)
         mainSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
             surface.release()
@@ -710,6 +789,17 @@ class CarPlayHostActivity : ComponentActivity() {
                 setColor(Color.argb(170, 0, 0, 0))
             }
         }
+        val settingsButton = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_settings)
+            imageTintList = ColorStateList.valueOf(Color.rgb(0xA6, 0x7D, 0xF2))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(0xE3, 0xE3, 0xE4))
+            }
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            contentDescription = "Open settings"
+            setOnClickListener { openSettingsMenu() }
+        }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -722,6 +812,11 @@ class CarPlayHostActivity : ComponentActivity() {
             Gravity.TOP or Gravity.END,
         )
         stageParams.setMargins(dp(12), dp(12), dp(12), 0)
+        val settingsButtonParams = FrameLayout.LayoutParams(
+            dp(56),
+            dp(56),
+            Gravity.BOTTOM or Gravity.END,
+        ).apply { setMargins(dp(16), 0, dp(16), dp(16)) }
 
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
         val editor = buildSafeAreaEditor().apply { visibility = View.GONE }
@@ -744,6 +839,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         root.addView(logScroll, statusParams)
         root.addView(stageStatus, stageParams)
+        root.addView(settingsButton, settingsButtonParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -771,6 +867,7 @@ class CarPlayHostActivity : ComponentActivity() {
         clusterContainer = clusterFrame
         clusterView = cluster
         gestureOverlay = gestureLayer
+        disconnectedSettingsButton = settingsButton
         settingsMenu = settings
         safeAreaEditor = editor
         statusView = log
@@ -927,14 +1024,21 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(12) },
         )
 
+        content.addView(
+            settingsCategoryHeader("Audio"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+        content.addView(
+            buildMicrophoneGainSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
         if (advancedAudioChannelMappingSupported) {
-            content.addView(
-                settingsCategoryHeader("Audio"),
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(36) },
-            )
             content.addView(
                 settingsSwitchRow(
                     label = "Advanced audio channel mapping",
@@ -951,7 +1055,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(12) },
+                ).apply { topMargin = dp(20) },
             )
         }
 
@@ -1264,6 +1368,17 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+        content.addView(
+            settingsSwitchRow(
+                label = "More gestures to Settings page",
+                checked = moreGesturesToSettings,
+                description = "Enable a one-finger swipe down along the left edge to open settings",
+            ) { checked -> moreGesturesToSettings = checked },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
 
         content.addView(
             settingsCategoryHeader("Diagnostics"),
@@ -1278,6 +1393,21 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
+        )
+        content.addView(
+            Button(this).apply {
+                text = "Open system Bluetooth settings"
+                isAllCaps = false
+                textSize = 17f
+                setTextColor(MENU_BUTTON_TEXT)
+                backgroundTintList = ColorStateList.valueOf(MENU_ACCENT)
+                minHeight = dp(52)
+                setOnClickListener { openSystemBluetoothSettings() }
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) },
         )
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -1413,6 +1543,8 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveMfiI2cPath(this, mfiI2cPath)
         AirPlayPersistence.saveRemoteMfiServer(this, remoteMfiServer)
         AirPlayPersistence.saveRemoteMfiToken(this, remoteMfiToken)
+        AirPlayPersistence.saveLocalMfiCertificateUri(this, localMfiCertificateUri)
+        AirPlayPersistence.saveLocalMfiPrivateKeyUri(this, localMfiPrivateKeyUri)
         AirPlayPersistence.saveWirelessHotspotMode(this, wirelessHotspotMode)
         AirPlayPersistence.saveManualHotspotSsid(this, manualHotspotSsid)
         AirPlayPersistence.saveManualHotspotPassphrase(this, manualHotspotPassphrase)
@@ -1422,6 +1554,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveLocationReportingEnabled(this, locationReportingEnabled)
         AirPlayPersistence.saveAutoStartOnBoot(this, autoStartOnBoot)
         AirPlayPersistence.saveAdvancedAudioChannelMapping(this, advancedAudioChannelMapping)
+        AirPlayPersistence.saveMicrophoneGainPercent(this, microphoneGainPercent)
         AirPlayPersistence.saveDisplayScaleTenths(this, displayScaleTenths)
         AirPlayPersistence.saveFps(this, fps)
         AirPlayPersistence.saveWidthPhysicalMm(this, widthPhysicalMm)
@@ -1433,6 +1566,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveModel(this, model)
         AirPlayPersistence.saveOemLabel(this, oemLabel)
         AirPlayPersistence.saveDebugLogsEnabled(this, debugLogsEnabled)
+        AirPlayPersistence.saveMoreGesturesToSettings(this, moreGesturesToSettings)
         AirPlayPersistence.saveRightHandDrive(this, rightHandDrive)
         AirPlayPersistence.saveHideTopBar(this, hideTopBar)
         AirPlayPersistence.saveHideBottomBar(this, hideBottomBar)
@@ -1486,6 +1620,7 @@ class CarPlayHostActivity : ComponentActivity() {
         locationPermissionAvailable = hasFineLocationPermission()
         hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
         syncMfiSettingsControls()
+        syncMicrophoneGainControls()
         updateManualHotspotFields()
         updateAirPlayIconPreview()
         updateSafeAreaSummary()
@@ -1506,6 +1641,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 MfiTarget.USB_CH341 to "USB/CH341",
                 MfiTarget.I2C to "I2C",
                 MfiTarget.REMOTE to "Remote",
+                MfiTarget.LOCAL_FILES to "Local files",
             ),
             selected = mfiTarget,
         ) { target ->
@@ -1606,6 +1742,58 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(8) },
         )
         mfiRemoteFields = remoteFields
+
+        val localFields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(
+                localMfiDocumentRow(
+                    "Certificate (.p7b)",
+                    localMfiCertificateUri,
+                    onDocumentViewCreated = { localMfiCertificateDocumentView = it },
+                ) {
+                    externalActivityInProgress = true
+                    localMfiCertificatePicker.launch(arrayOf("*/*"))
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                localMfiDocumentRow(
+                    "Private key (.pk8)",
+                    localMfiPrivateKeyUri,
+                    onDocumentViewCreated = { localMfiPrivateKeyDocumentView = it },
+                ) {
+                    externalActivityInProgress = true
+                    localMfiPrivateKeyPicker.launch(arrayOf("*/*"))
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(8) },
+            )
+            addView(
+                menuText(
+                    "Select a DER PKCS#7 certificate and its matching unencrypted DER PKCS#8 " +
+                        "private key. Documents are reloaded when MFI reconnects.",
+                    14f,
+                    MENU_SECONDARY,
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(4) },
+            )
+        }
+        section.addView(
+            localFields,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
+        )
+        mfiLocalFields = localFields
         val error = menuText("", 14f, MENU_DANGER).apply {
             visibility = View.GONE
         }
@@ -1624,7 +1812,95 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateMfiTargetFields() {
         mfiI2cFields?.visibility = if (mfiTarget == MfiTarget.I2C) View.VISIBLE else View.GONE
         mfiRemoteFields?.visibility = if (mfiTarget == MfiTarget.REMOTE) View.VISIBLE else View.GONE
+        mfiLocalFields?.visibility = if (mfiTarget == MfiTarget.LOCAL_FILES) View.VISIBLE else View.GONE
         mfiErrorView?.visibility = View.GONE
+    }
+
+    private fun localMfiDocumentRow(
+        label: String,
+        uri: String,
+        onDocumentViewCreated: (TextView) -> Unit,
+        onChoose: () -> Unit,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(
+            menuText(label, 15f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        val row = LinearLayout(this@CarPlayHostActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val documentView = menuText(localMfiDocumentLabel(uri), 14f, MENU_SECONDARY)
+        onDocumentViewCreated(documentView)
+        row.addView(
+            documentView,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        row.addView(
+            Button(this@CarPlayHostActivity).apply {
+                text = "Choose"
+                isAllCaps = false
+                contentDescription = "Choose $label"
+                setOnClickListener { onChoose() }
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(12) },
+        )
+        addView(
+            row,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) },
+        )
+    }
+
+    private fun updateLocalMfiDocumentViews() {
+        localMfiCertificateDocumentView?.text = localMfiDocumentLabel(localMfiCertificateUri)
+        localMfiPrivateKeyDocumentView?.text = localMfiDocumentLabel(localMfiPrivateKeyUri)
+    }
+
+    private fun localMfiDocumentLabel(value: String): String {
+        if (value.isEmpty()) return "Not selected"
+        val uri = try {
+            Uri.parse(value)
+        } catch (_: Exception) {
+            return "Selection unavailable"
+        }
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (column >= 0) cursor.getString(column) else null
+            } ?: uri.lastPathSegment ?: "Selected document"
+        } catch (_: Exception) {
+            uri.lastPathSegment ?: "Selected document"
+        }
+    }
+
+    private fun retainDocumentReadPermission(uri: Uri, label: String): Boolean = try {
+        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        true
+    } catch (failure: SecurityException) {
+        Log.e(TAG, "Could not retain local MFi $label document permission", failure)
+        Toast.makeText(
+            this,
+            "Could not keep access to the selected $label",
+            Toast.LENGTH_LONG,
+        ).show()
+        false
     }
 
     private fun syncMfiSettingsControls() {
@@ -1644,6 +1920,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (remoteMfiTokenInput?.text?.toString() != remoteMfiToken) {
             remoteMfiTokenInput?.setText(remoteMfiToken)
         }
+        updateLocalMfiDocumentViews()
         updateMfiTargetFields()
     }
 
@@ -1651,6 +1928,7 @@ class CarPlayHostActivity : ComponentActivity() {
         MfiTarget.USB_CH341 -> "USB/CH341"
         MfiTarget.I2C -> "I2C"
         MfiTarget.REMOTE -> "Remote"
+        MfiTarget.LOCAL_FILES -> "Local files"
     }
 
     private fun buildIdentitySettingsSection(): View {
@@ -1768,9 +2046,239 @@ class CarPlayHostActivity : ComponentActivity() {
             description = "Show on-screen debug logs",
         ) { checked ->
             debugLogsEnabled = checked
+            if (!checked) clearScreenLogs()
             appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
             updateDebugOverlays()
         }
+
+    private fun buildMicrophoneGainSection(): View {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(
+            menuText("Microphone gain (0.8x–2.0x)", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val gainValue = menuText(
+            microphoneGainLabel(microphoneGainPercent),
+            22f,
+            MENU_ACCENT,
+            bold = true,
+        )
+        microphoneGainValueView = gainValue
+        header.addView(
+            gainValue,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        section.addView(
+            header,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val gainSlider = SeekBar(this).apply {
+            max = (MicrophoneGain.MAX_PERCENT - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+            progress = (microphoneGainPercent - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+            splitTrack = false
+            progressTintList = ColorStateList.valueOf(MENU_ACCENT)
+            thumbTintList = ColorStateList.valueOf(MENU_ACCENT)
+            contentDescription = "Microphone gain"
+            setOnSeekBarChangeListener(
+                object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(
+                        seekBar: SeekBar,
+                        progress: Int,
+                        fromUser: Boolean,
+                    ) {
+                        val percent = MicrophoneGain.sanitize(
+                            MicrophoneGain.MIN_PERCENT +
+                                progress * MicrophoneGain.STEP_PERCENT,
+                        )
+                        microphoneGainPercent = percent
+                        microphoneGainValueView?.text = microphoneGainLabel(percent)
+                    }
+
+                    override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                    override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+                },
+            )
+        }
+        microphoneGainSeekBar = gainSlider
+        controls.addView(
+            gainSlider,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val testButton = Button(this).apply {
+            text = "Test"
+            isAllCaps = false
+            textSize = 16f
+            setTextColor(MENU_BUTTON_TEXT)
+            backgroundTintList = ColorStateList.valueOf(MENU_ACCENT)
+            minWidth = dp(78)
+            contentDescription = "Test microphone level"
+            setOnClickListener {
+                if (microphoneLevelMonitor?.isRunning == true) {
+                    stopMicrophoneGainTest()
+                } else {
+                    startMicrophoneGainTest()
+                }
+            }
+        }
+        microphoneTestButton = testButton
+        controls.addView(
+            testButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) },
+        )
+        section.addView(
+            controls,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
+        )
+
+        val levelHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        levelHeader.addView(
+            menuText("Peak level", 15f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val levelValue = menuText("0%", 15f, MENU_SECONDARY)
+        microphoneLevelValueView = levelValue
+        levelHeader.addView(
+            levelValue,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        section.addView(
+            levelHeader,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
+        )
+        val levelBar = ProgressBar(
+            this,
+            null,
+            android.R.attr.progressBarStyleHorizontal,
+        ).apply {
+            max = 100
+            progress = 0
+            progressTintList = ColorStateList.valueOf(MENU_ACCENT)
+            progressBackgroundTintList = ColorStateList.valueOf(MENU_TRACK_OFF)
+            contentDescription = "Microphone peak level"
+        }
+        microphoneLevelBar = levelBar
+        section.addView(
+            levelBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(14),
+            ).apply { topMargin = dp(4) },
+        )
+        return section
+    }
+
+    private fun microphoneGainLabel(percent: Int): String =
+        String.format(Locale.US, "%.1fx", MicrophoneGain.sanitize(percent) / 100.0)
+
+    private fun syncMicrophoneGainControls() {
+        microphoneGainValueView?.text = microphoneGainLabel(microphoneGainPercent)
+        microphoneGainSeekBar?.progress =
+            (microphoneGainPercent - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+    }
+
+    private fun startMicrophoneGainTest() {
+        if (!menuOpen || handshakeResetInProgress || microphoneLevelMonitor != null) return
+        if (!microphoneAvailable) {
+            microphoneGainTestAfterPermission = true
+            microphoneLevelValueView?.text = "Permission required"
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        lateinit var monitor: MicrophoneLevelMonitor
+        monitor = MicrophoneLevelMonitor(
+            context = applicationContext,
+            gainPercent = { microphoneGainPercent },
+            onPeakPercent = { peak ->
+                runOnUiThread {
+                    if (microphoneLevelMonitor !== monitor || !menuOpen || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    microphoneLevelBar?.progress = peak
+                    microphoneLevelValueView?.text = "$peak%"
+                }
+            },
+            onStopped = { error ->
+                runOnUiThread {
+                    if (microphoneLevelMonitor !== monitor) return@runOnUiThread
+                    microphoneLevelMonitor = null
+                    microphoneTestButton?.text = "Test"
+                    microphoneTestButton?.isEnabled = menuOpen && !handshakeResetInProgress
+                    if (error != null) {
+                        Log.e(TAG, "microphone gain test failed", error)
+                        microphoneLevelBar?.progress = 0
+                        microphoneLevelValueView?.text =
+                            error.message ?: "Test failed"
+                    }
+                }
+            },
+        )
+        microphoneLevelMonitor = monitor
+        microphoneTestButton?.text = "Stop"
+        microphoneLevelBar?.progress = 0
+        microphoneLevelValueView?.text = "Listening…"
+        if (!monitor.start()) {
+            microphoneLevelMonitor = null
+            microphoneTestButton?.text = "Test"
+        }
+    }
+
+    private fun stopMicrophoneGainTest() {
+        microphoneGainTestAfterPermission = false
+        val monitor = microphoneLevelMonitor
+        microphoneLevelMonitor = null
+        monitor?.close()
+        microphoneTestButton?.text = "Test"
+        microphoneLevelBar?.progress = 0
+        microphoneLevelValueView?.text = "0%"
+    }
+
+    private fun openSystemBluetoothSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+        } catch (error: ActivityNotFoundException) {
+            appendLog("System Bluetooth settings are unavailable: ${error.message}")
+            Toast.makeText(this, "System Bluetooth settings are unavailable", Toast.LENGTH_LONG).show()
+        } catch (error: SecurityException) {
+            appendLog("Cannot open system Bluetooth settings: ${error.message}")
+            Toast.makeText(this, "Cannot open system Bluetooth settings", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun buildStepSliderSection(
         title: String,
@@ -2427,9 +2935,15 @@ class CarPlayHostActivity : ComponentActivity() {
                 !remoteMfiServer.trim().startsWith("http://") &&
                 !remoteMfiServer.trim().startsWith("https://") ->
                 "Remote server address must start with http:// or https://"
+            mfiTarget == MfiTarget.LOCAL_FILES && localMfiCertificateUri.isBlank() ->
+                "Select a local certificate"
+            mfiTarget == MfiTarget.LOCAL_FILES && localMfiPrivateKeyUri.isBlank() ->
+                "Select a local private key"
             '\u0000' in mfiI2cPath -> "I2C device path contains U+0000"
             '\u0000' in remoteMfiServer -> "Remote server address contains U+0000"
             '\u0000' in remoteMfiToken -> "Remote token contains U+0000"
+            '\u0000' in localMfiCertificateUri -> "Local certificate URI contains U+0000"
+            '\u0000' in localMfiPrivateKeyUri -> "Local private key URI contains U+0000"
             else -> null
         }
         mfiErrorView?.text = error.orEmpty()
@@ -2862,11 +3376,13 @@ class CarPlayHostActivity : ComponentActivity() {
         videoHeight: Int,
         controllerGeneration: Int,
     ): AndroidMediaSink = AndroidMediaSink(
+        context = applicationContext,
         surface = null,
         videoWidth = videoWidth,
         videoHeight = videoHeight,
         preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
         advancedAudioChannelMapping = advancedAudioChannelMapping,
+        microphoneGainPercent = microphoneGainPercent,
         onScreenStreamActiveChanged = { type, active ->
             onScreenStreamStateChanged(controllerGeneration, type, active)
         },
@@ -2926,16 +3442,23 @@ class CarPlayHostActivity : ComponentActivity() {
             }
 
             override fun onDebugLog(message: String) {
-                runOnUiThread {
-                    if (menuOpen || controllerGeneration != restartGeneration) {
-                        return@runOnUiThread
-                    }
-                    if (message.startsWith(PROTOCOL_TRACE_PREFIX) ||
-                        message.startsWith(PROTOCOL_IAP2_TRACE_PREFIX)
-                    ) {
-                        appendProtocolLog(message)
-                    } else {
-                        appendLog(message)
+                val now = System.currentTimeMillis()
+                appendFileLog(message, now)
+                if (!debugLogsEnabled || message.startsWith(PROTOCOL_TRACE_PREFIX)) return
+                val uiMessage = if (message.startsWith(PROTOCOL_IAP2_TRACE_PREFIX)) {
+                    val firstLine = message.lineSequence().firstOrNull().orEmpty()
+                    if (firstLine.length <= MAX_PROTOCOL_UI_LINE_CHARS) firstLine
+                    else firstLine.take(MAX_PROTOCOL_UI_LINE_CHARS) + "..."
+                } else {
+                    message
+                }
+                synchronized(pendingScreenLogsLock) {
+                    if (!debugLogsEnabled) return
+                    pendingScreenLogs.addLast(PendingLog(controllerGeneration, now, uiMessage))
+                    if (pendingScreenLogs.size > MAX_SCREEN_LOG_LINES) pendingScreenLogs.removeFirst()
+                    if (!screenDrainPosted) {
+                        screenDrainPosted = true
+                        mainHandler.post(drainScreenLogs)
                     }
                 }
             }
@@ -3195,6 +3718,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun openSettingsMenu() {
         if (menuOpen || shuttingDown.get()) return
+        stopMicrophoneGainTest()
         settingsBaseline = captureSettingsBaseline()
         menuOpen = true
         handshakeResetInProgress = true
@@ -3212,8 +3736,10 @@ class CarPlayHostActivity : ComponentActivity() {
         setConnectionStage("Reconnecting after settings")
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
+        syncMicrophoneGainControls()
+        microphoneTestButton?.isEnabled = false
         updateDebugOverlays()
-        logLines.clear()
+        clearScreenLogs()
         appendLog("Settings opened; CarPlay handshake reset")
         updateResolutionMenu()
         teardownExecutor.execute {
@@ -3229,6 +3755,7 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         handshakeResetInProgress = false
+                        microphoneTestButton?.isEnabled = menuOpen
                         if (!menuOpen && startAfterHandshakeReset) {
                             startAfterHandshakeReset = false
                             maybeStartCarPlay()
@@ -3256,11 +3783,12 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun finishSettingsMenu(prefix: String) {
         if (!menuOpen) return
+        stopMicrophoneGainTest()
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
         updateDebugOverlays()
-        logLines.clear()
+        clearScreenLogs()
         appendLog(
             "$prefix; starting a fresh handshake at " +
                 "${CarPlayDisplayScale.label(displayScaleTenths)} with " +
@@ -3284,6 +3812,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun shutdown(terminateProcess: Boolean, reason: String) {
         if (!shuttingDown.compareAndSet(false, true)) return
+        stopMicrophoneGainTest()
         restartGeneration += 1
         mainHandler.removeCallbacks(applyDisplaySize)
         val oldController = controller
@@ -3339,9 +3868,15 @@ class CarPlayHostActivity : ComponentActivity() {
             MotionEvent.ACTION_DOWN -> {
                 gestureSequenceActive = false
                 gestureTracking = false
+                edgeSettingsGestureCaptured = moreGesturesToSettings &&
+                    event.x in 0f..(view.width / 8f) &&
+                    event.y in 0f..(view.height / 4f)
+                edgeSettingsGestureEligible = edgeSettingsGestureCaptured
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount == THREE_FINGER_COUNT && !gestureSequenceActive) {
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
                     gestureSequenceActive = true
                     gestureTracking = true
                     gestureStartX = pointerCentroid(event, horizontal = true)
@@ -3351,6 +3886,30 @@ class CarPlayHostActivity : ComponentActivity() {
                     return true
                 }
             }
+        }
+
+        if (edgeSettingsGestureCaptured) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_POINTER_DOWN -> edgeSettingsGestureEligible = false
+                MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount != 1 || event.x !in 0f..(view.width / 8f)) {
+                        edgeSettingsGestureEligible = false
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    val openSettings = edgeSettingsGestureEligible &&
+                        event.x in 0f..(view.width / 8f) &&
+                        event.y in (view.height * 3f / 4f)..view.height.toFloat()
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
+                    if (openSettings) openSettingsMenu()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
+                }
+            }
+            return true
         }
 
         if (gestureSequenceActive) {
@@ -3433,6 +3992,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateDebugOverlays() {
         val showLogs = debugLogsEnabled && !menuOpen
         statusScrollView?.visibility = if (showLogs) View.VISIBLE else View.GONE
+        disconnectedSettingsButton?.visibility =
+            if (!menuOpen && activeScreenStreamTypes.isEmpty()) View.VISIBLE else View.GONE
         val showStage = !debugLogsEnabled &&
             !menuOpen &&
             activeScreenStreamTypes.isEmpty()
@@ -3441,34 +4002,20 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun appendLog(message: String) {
         val now = System.currentTimeMillis()
-        appendLogEntry(message, message, now)
+        appendFileLog(message, now)
+        if (debugLogsEnabled && !menuOpen) appendScreenLog(now, message)
     }
 
-    private fun appendProtocolLog(message: String) {
-        val now = System.currentTimeMillis()
-        val detailed = if (message.startsWith(PROTOCOL_TRACE_PREFIX)) {
-            message
-        } else {
-            "$PROTOCOL_TRACE_PREFIX$message"
+    private fun appendScreenLog(timestampMillis: Long, message: String) {
+        logLines.add(timestampMillis, formattedLogLine(message, timestampMillis))
+        if (!logRenderScheduled) {
+            logRenderScheduled = true
+            mainHandler.postDelayed(renderLogLines, LOG_RENDER_INTERVAL_MILLIS)
         }
-        val firstLine = detailed.lineSequence().firstOrNull().orEmpty()
-        val summary = if (firstLine.length <= MAX_PROTOCOL_UI_LINE_CHARS) {
-            firstLine
-        } else {
-            firstLine.take(MAX_PROTOCOL_UI_LINE_CHARS) + "..."
-        }
-        appendLogEntry(summary, detailed, now)
     }
 
-    private fun appendLogEntry(
-        uiMessage: String,
-        fileMessage: String,
-        nowMillis: Long,
-    ) {
-        logLines.addLast(LogEntry(nowMillis, formattedLogLine(uiMessage, nowMillis)))
-        sessionLog?.append(formattedLogLine(fileMessage, nowMillis))
-        refreshLogView(nowMillis)
-    }
+    private fun appendFileLog(message: String, timestampMillis: Long) =
+        sessionLog?.appendTimestamped(message, timestampMillis)
 
     private fun formattedLogLine(message: String, nowMillis: Long): String =
         "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(nowMillis))}  $message"
@@ -3488,22 +4035,31 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun refreshLogView(nowMillis: Long) {
+        if (!debugLogsEnabled || menuOpen) return
         val cutoff = nowMillis - LOG_RETENTION_MILLIS
-        while (logLines.firstOrNull()?.timestampMillis?.let { it <= cutoff } == true) {
-            logLines.removeFirst()
-        }
-        while (logLines.size > MAX_DISPLAY_LOG_LINES) {
-            logLines.removeFirst()
-        }
-        statusView?.text = logLines.joinToString("\n") { it.text }
+        logLines.expireBefore(cutoff)
+        statusView?.text = logLines.renderedText()
         scrollLogsToBottom()
 
         mainHandler.removeCallbacks(expireOldLogLines)
-        logLines.firstOrNull()?.let { oldest ->
-            val delay = (oldest.timestampMillis + LOG_RETENTION_MILLIS - nowMillis + 1L)
+        logLines.firstTimestampMillis?.let { oldest ->
+            val delay = (oldest + LOG_RETENTION_MILLIS - nowMillis + 1L)
                 .coerceAtLeast(1L)
             mainHandler.postDelayed(expireOldLogLines, delay)
         }
+    }
+
+    private fun clearScreenLogs() {
+        synchronized(pendingScreenLogsLock) {
+            pendingScreenLogs.clear()
+            screenDrainPosted = false
+        }
+        mainHandler.removeCallbacks(drainScreenLogs)
+        logLines.clear()
+        mainHandler.removeCallbacks(expireOldLogLines)
+        mainHandler.removeCallbacks(renderLogLines)
+        logRenderScheduled = false
+        statusView?.text = ""
     }
 
     private fun scrollLogsToBottom() {
@@ -3566,6 +4122,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
+        const val LOG_RENDER_INTERVAL_MILLIS = 100L
+        const val MAX_SCREEN_LOG_LINES = 100
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
         const val RECONNECT_DELAY_MILLIS = 2_000L
         const val IAP_TUNNEL_RECONNECT_DELAY_MILLIS = 15_000L
@@ -3592,7 +4150,11 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private data class DisplaySize(val width: Int, val height: Int)
-    private data class LogEntry(val timestampMillis: Long, val text: String)
+    private data class PendingLog(
+        val generation: Int,
+        val timestampMillis: Long,
+        val message: String,
+    )
     private data class HotspotStatus(
         val state: String,
         val ssid: String? = null,

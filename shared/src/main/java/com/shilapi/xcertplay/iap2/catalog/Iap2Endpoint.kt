@@ -117,6 +117,17 @@ object Iap2Endpoints {
                     field(5, "isAvailable", Iap2WireType.VOID),
                 ),
             ),
+            field(
+                18,
+                "iAP2HIDComponent",
+                Iap2WireType.GROUP,
+                repeatable = true,
+                children = listOf(
+                    field(0, "componentID", Iap2WireType.U16, required = true),
+                    field(1, "name", Iap2WireType.STRING, required = true),
+                    field(2, "function", Iap2WireType.U8, required = true),
+                ),
+            ),
             field(20, "VehicleInformation", Iap2WireType.GROUP),
             field(21, "VehicleStatus", Iap2WireType.GROUP),
             field(22, "LocationInformation", Iap2WireType.GROUP),

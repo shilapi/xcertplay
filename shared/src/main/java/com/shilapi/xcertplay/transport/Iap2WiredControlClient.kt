@@ -2,12 +2,12 @@ package com.shilapi.xcertplay.transport
 
 import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
 import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
+import com.shilapi.xcertplay.iap2.message.Iap2HidMessages
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import java.net.Inet6Address
 import java.net.InetAddress
-import kotlin.math.min
 
 /**
  * The wired LIVI control sequence after a CSM channel is ready:
@@ -25,28 +25,35 @@ class Iap2WiredControlClient(
         identification: Iap2IdentificationConfig,
         endpoint: Iap2WiredCarPlayEndpoint,
         availableCurrentMilliAmps: Int,
-        timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        bringUpTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
+        onReady: () -> Unit = {},
+        onStopped: () -> Unit = {},
         onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
         require(availableCurrentMilliAmps in 0..0xffff) {
             "availableCurrentMilliAmps must be in 0..65535"
         }
-        require(timeoutMillis in 1..MAX_TIMEOUT_MILLIS) {
-            "timeoutMillis must be in 1..$MAX_TIMEOUT_MILLIS"
+        require(bringUpTimeoutMillis in 1..MAX_TIMEOUT_MILLIS) {
+            "bringUpTimeoutMillis must be in 1..$MAX_TIMEOUT_MILLIS"
         }
 
-        val deadlineNanos = deadlineAfter(timeoutMillis)
-        Iap2IdentificationClient(session).identify(identification, requireRemaining(deadlineNanos))
+        val bringUpDeadlineNanos = deadlineAfter(bringUpTimeoutMillis)
+        Iap2IdentificationClient(session).identify(
+            identification,
+            requireRemaining(bringUpDeadlineNanos),
+        )
         onProgress("iap2 identification accepted")
         var stage = Iap2WiredControlStage.IDENTIFIED
-        mfi.run(session, requireRemaining(deadlineNanos), onProgress)
+        mfi.run(session, requireRemaining(bringUpDeadlineNanos), onProgress)
         stage = Iap2WiredControlStage.AUTHENTICATED
         onProgress("iap2 authentication accepted")
 
-        send(powerSourceUpdate(availableCurrentMilliAmps), deadlineNanos)
-        for (subscription in subscriptions()) send(subscription, deadlineNanos)
+        sendDuringBringUp(powerSourceUpdate(availableCurrentMilliAmps), bringUpDeadlineNanos)
+        for (subscription in subscriptions()) {
+            sendDuringBringUp(subscription, bringUpDeadlineNanos)
+        }
         stage = Iap2WiredControlStage.SUBSCRIBED
         onProgress("iap2 power/subscriptions sent")
 
@@ -54,34 +61,34 @@ class Iap2WiredControlClient(
         var carPlayStartSessions = 0
         var locationActive = false
         var locationSentLogged = false
+        var hidStarted = false
         try {
+            sendDuringBringUp(
+                Iap2HidMessages.startMediaPlaybackRemote(
+                    identification.hidVendorIdentifier,
+                    identification.hidProductIdentifier,
+                ),
+                bringUpDeadlineNanos,
+            )
+            hidStarted = true
+            onProgress("iap2 tx=0x6800 start media playback remote")
+            onReady()
+            // The control session is long-lived. Poll timeouts only wake this loop; they do not end it.
             while (true) {
-                val remaining = remainingMillis(deadlineNanos)
-                if (remaining == 0L) {
-                    return Iap2WiredControlResult(Iap2WiredControlTerminal.TIMED_OUT, stage, forwardedFrames, carPlayStartSessions)
-                }
-                if (locationActive && sendLatestLocation(locationProvider, deadlineNanos) && !locationSentLogged) {
+                if (locationActive && sendLatestLocation(locationProvider) && !locationSentLogged) {
                     locationSentLogged = true
                     onProgress("iap2 tx=0xfffb location-information")
                 }
                 val pollTimeout = if (locationActive) {
-                    min(remaining, LOCATION_POLL_INTERVAL_MILLIS)
+                    LOCATION_POLL_INTERVAL_MILLIS
                 } else {
-                    remaining
+                    CONTROL_POLL_INTERVAL_MILLIS
                 }
                 val incoming = session.recv(pollTimeout)
                 if (incoming == null) {
                     if (session.isClosed) {
                         return Iap2WiredControlResult(
                             Iap2WiredControlTerminal.CHANNEL_CLOSED,
-                            stage,
-                            forwardedFrames,
-                            carPlayStartSessions,
-                        )
-                    }
-                    if (remainingMillis(deadlineNanos) == 0L) {
-                        return Iap2WiredControlResult(
-                            Iap2WiredControlTerminal.TIMED_OUT,
                             stage,
                             forwardedFrames,
                             carPlayStartSessions,
@@ -96,7 +103,7 @@ class Iap2WiredControlClient(
                         onProgress(carPlayAvailabilitySummary(incoming.payload))
                         // LIVI sends its wired answer on every availability notification; do not gate it on
                         // the phone's advertised availability boolean.
-                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        sendDuringControl(carPlayStartSession(endpoint))
                         stage = Iap2WiredControlStage.CARPLAY_START_SENT
                         carPlayStartSessions++
                         onProgress("iap2 tx=0x4301 carplay-start-session")
@@ -106,7 +113,7 @@ class Iap2WiredControlClient(
                         onProgress("iap2 rx=0xfffa start-location-information")
                         locationActive = startLocationUpdates(locationProvider, onProgress)
                         locationSentLogged = false
-                        if (locationActive && sendLatestLocation(locationProvider, deadlineNanos)) {
+                        if (locationActive && sendLatestLocation(locationProvider)) {
                             locationSentLogged = true
                             onProgress("iap2 tx=0xfffb location-information")
                         }
@@ -128,21 +135,30 @@ class Iap2WiredControlClient(
             }
         } finally {
             locationProvider?.stop()
+            if (hidStarted && !session.isClosed) {
+                runCatching {
+                    session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
+                }
+            }
+            onStopped()
         }
     }
 
-    private fun send(frame: Iap2Frame, deadlineNanos: Long) {
+    private fun sendDuringBringUp(frame: Iap2Frame, deadlineNanos: Long) {
         session.send(frame, requireRemaining(deadlineNanos))
+    }
+
+    private fun sendDuringControl(frame: Iap2Frame) {
+        session.send(frame, CONTROL_SEND_TIMEOUT_MILLIS)
     }
 
     private fun sendLatestLocation(
         provider: Iap2LocationProvider?,
-        deadlineNanos: Long,
     ): Boolean {
         val sentence = provider?.latestNmea() ?: return false
         session.send(
             Iap2LocationMessages.locationInformation(sentence),
-            requireRemaining(deadlineNanos),
+            CONTROL_SEND_TIMEOUT_MILLIS,
         )
         return true
     }
@@ -166,9 +182,12 @@ class Iap2WiredControlClient(
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
         private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
+        private const val CONTROL_POLL_INTERVAL_MILLIS = 60_000L
+        private const val CONTROL_SEND_TIMEOUT_MILLIS = 5_000L
+        private const val HID_STOP_TIMEOUT_MILLIS = 1_000L
         private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
         private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
-        private const val MAX_RECV_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+        private const val MAX_BRING_UP_STEP_TIMEOUT_MILLIS = 5 * 60 * 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Exact LIVI wired PowerSourceUpdate encoding: current and the charge-if-powered flag. */
@@ -213,7 +232,7 @@ class Iap2WiredControlClient(
             val remaining = deadlineNanos - System.nanoTime()
             if (remaining <= 0) return 0L
             return ((remaining + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
-                .coerceAtMost(MAX_RECV_TIMEOUT_MILLIS)
+                .coerceAtMost(MAX_BRING_UP_STEP_TIMEOUT_MILLIS)
         }
 
     }
@@ -263,7 +282,7 @@ enum class Iap2WiredControlStage {
     CARPLAY_START_SENT,
 }
 
-enum class Iap2WiredControlTerminal { CHANNEL_CLOSED, TIMED_OUT }
+enum class Iap2WiredControlTerminal { CHANNEL_CLOSED }
 
 /** End state of the control loop only; it is not evidence of NCM or AirPlay availability. */
 data class Iap2WiredControlResult(

@@ -230,6 +230,7 @@ data class AirPlayConfig(
     val hevc: Boolean = false,
     val disableAudioOutput: Boolean = false,
     val microphone: Boolean = false,
+    val wirelessAudio: Boolean = false,
     val manufacturer: String = "xcertplay",
     val model: String = "xcertplay",
     val oemLabel: String = "xcertplay",

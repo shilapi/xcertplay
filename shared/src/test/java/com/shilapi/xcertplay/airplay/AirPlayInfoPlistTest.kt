@@ -209,13 +209,35 @@ class AirPlayInfoPlistTest {
                 .containsKey("audioInputFormats"),
         )
         assertEquals(
-            0x70004154,
+            0x4154,
             defaultAudio(AirPlayInfoPlist.build(base.copy(microphone = true)))["audioInputFormats"],
         )
         assertEquals(
-            0x70004154,
+            0x4154,
             telephony(AirPlayInfoPlist.build(base.copy(microphone = true)))["audioInputFormats"],
         )
+        assertEquals(
+            0x70004154,
+            defaultAudio(AirPlayInfoPlist.build(base.copy(microphone = true, wirelessAudio = true)))["audioInputFormats"],
+        )
+    }
+
+    @Test
+    fun wiredMainAudioAdvertisesOnlyPcmAndWirelessKeepsOpus() {
+        val base = AirPlayConfig(
+            deviceName = "test",
+            deviceId = "02:00:00:00:00:02",
+            btMac = "02:00:00:00:00:02",
+            sourceVersion = "366.0",
+            main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+        )
+        fun defaultOutput(config: AirPlayConfig): Int =
+            (AirPlayInfoPlist.build(config)["audioFormats"] as List<*>)
+                .map { it as Map<*, *> }
+                .single { it["type"] == 100 && it["audioType"] == "default" }["audioOutputFormats"] as Int
+
+        assertEquals(0xc3fc, defaultOutput(base))
+        assertEquals(0x7000c3fc, defaultOutput(base.copy(wirelessAudio = true)))
     }
 
     @Test

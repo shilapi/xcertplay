@@ -12,6 +12,7 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.util.Log
 import java.io.Closeable
 import java.util.concurrent.Executor
 
@@ -171,17 +172,79 @@ class Ch341UsbSession internal constructor(
 
     @Synchronized
     internal fun bulkWrite(data: ByteArray, timeoutMillis: Int) {
-        transfer(outputEndpoint, data, timeoutMillis, "write")
+        val transferred = transfer(outputEndpoint, data, timeoutMillis, "write")
+        if (transferred != data.size) {
+            Log.w(TAG, "bulk write sent $transferred of ${data.size} bytes: ${data.toHexPreview()}")
+            throw I2cTransportException.Protocol(
+                "CH341 bulk write transferred $transferred of ${data.size} bytes",
+            )
+        }
     }
 
+    /**
+     * Reads the controller's answer to one stream packet, stopping at whatever it sends.
+     *
+     * The number of ACK/NACK status bytes the CH341 prepends to the read data is a firmware detail,
+     * so callers pass the worst-case length and align the answer from its tail. The first packet is
+     * awaited for [firstPacketMillis]; continuation packets only wait [quietMillis], so an answer
+     * shorter than [maxLength] costs one short wait instead of the full transaction timeout.
+     * [allowEmpty] accepts a packet the controller chooses not to answer at all.
+     */
     @Synchronized
-    internal fun bulkRead(length: Int, timeoutMillis: Int): ByteArray {
-        if (length <= 0) {
-            throw I2cTransportException.InvalidRequest("Bulk read length must be positive")
+    internal fun bulkReadAtMost(
+        maxLength: Int,
+        firstPacketMillis: Int,
+        quietMillis: Int,
+        allowEmpty: Boolean,
+    ): ByteArray {
+        if (maxLength < 0) {
+            throw I2cTransportException.InvalidRequest("Bulk read length must not be negative")
         }
-        val data = ByteArray(length)
-        transfer(inputEndpoint, data, timeoutMillis, "read")
-        return data
+        if (maxLength == 0) return ByteArray(0)
+        if (firstPacketMillis <= 0 || quietMillis <= 0) {
+            throw I2cTransportException.InvalidRequest("Bulk transfer timeout must be positive")
+        }
+        val data = ByteArray(maxLength)
+        // A full-size USB packet does NOT complete a bulk transfer: the read returns only
+        // once the buffer is full or a SHORT packet arrives. Asking for even one byte past
+        // the end of a whole-packet answer therefore makes bulkTransfer wait for data that
+        // never comes and time out, discarding the bytes that already arrived. The CH341
+        // answers in whole 32-byte packets, so every request stops on a packet boundary.
+        val packetSize = minOf(inputEndpoint.maxPacketSize.coerceAtLeast(1), MAX_USB_PACKET_BYTES)
+        var offset = 0
+        while (offset < maxLength) {
+            val packet = ByteArray(minOf(maxLength - offset, packetSize))
+            val waitMillis = if (offset == 0) firstPacketMillis else quietMillis
+            val fatal = offset == 0 && !allowEmpty
+            val transferred = try {
+                transfer(inputEndpoint, packet, waitMillis, "read", clearHaltOnFailure = fatal)
+            } catch (error: I2cTransportException.DeviceUnavailable) {
+                // The answer ended early: fewer status bytes than the worst case, or a packet the
+                // controller does not answer at all.
+                if (offset > 0 || allowEmpty) {
+                    Log.d(
+                        TAG,
+                        "bulk read ended early at $offset of $maxLength bytes " +
+                            "(quiet-packet timeout of ${waitMillis}ms; accepted as end of answer)",
+                    )
+                    break
+                }
+                throw error
+            }
+            if (transferred <= 0) {
+                if (offset > 0 || allowEmpty) break
+                throw I2cTransportException.DeviceUnavailable("CH341 bulk read returned no data")
+            }
+            System.arraycopy(packet, 0, data, offset, transferred)
+            offset += transferred
+        }
+        if (offset != maxLength) {
+            // The answer was shorter than the worst-case length the transport budgeted for: the
+            // controller returned fewer status bytes than it had written bytes, or the stream
+            // framing drifted off a packet boundary. Both are worth seeing in logcat.
+            Log.d(TAG, "bulk read answered $offset of $maxLength bytes (allowEmpty=$allowEmpty)")
+        }
+        return data.copyOf(offset)
     }
 
     @Synchronized
@@ -192,7 +255,13 @@ class Ch341UsbSession internal constructor(
         connection.close()
     }
 
-    private fun transfer(endpoint: UsbEndpoint, data: ByteArray, timeoutMillis: Int, operation: String) {
+    private fun transfer(
+        endpoint: UsbEndpoint,
+        data: ByteArray,
+        timeoutMillis: Int,
+        operation: String,
+        clearHaltOnFailure: Boolean = true,
+    ): Int {
         if (closed) throw I2cTransportException.DeviceUnavailable("CH341 USB session is closed")
         if (data.isEmpty()) throw I2cTransportException.InvalidRequest("Bulk $operation data must not be empty")
         if (timeoutMillis <= 0) {
@@ -209,12 +278,59 @@ class Ch341UsbSession internal constructor(
         if (transferred < 0) {
             // Android's bulkTransfer result does not identify whether the device timed out, NAKed,
             // or reported another USB failure. Do not manufacture a CH341 NAK classification.
+            clearEndpointHalt(endpoint, operation)
             throw I2cTransportException.DeviceUnavailable("CH341 bulk $operation failed or timed out")
         }
-        if (transferred != data.size) {
-            throw I2cTransportException.Protocol(
-                "CH341 bulk $operation transferred $transferred of ${data.size} bytes",
+        return transferred
+    }
+
+    /**
+     * Releases a bulk endpoint left halted by a failed transfer.
+     *
+     * A USB stall stays latched per endpoint, so once one transfer fails every later transfer on
+     * that endpoint fails the same way until something clears the halt. Re-opening the device
+     * clears it, which is why a full stack rebuild always recovers; clearing it here keeps a single
+     * stalled transfer from consuming the caller's entire retry budget.
+     *
+     * A control transfer is harmless when the endpoint was never halted, so this is a one-sided bet.
+     */
+    private fun clearEndpointHalt(endpoint: UsbEndpoint, operation: String) {
+        val result = try {
+            connection.controlTransfer(
+                UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_STANDARD or
+                    USB_RECIP_ENDPOINT,
+                USB_REQUEST_CLEAR_FEATURE,
+                USB_FEATURE_ENDPOINT_HALT,
+                endpoint.address,
+                null,
+                0,
+                RECOVERY_TIMEOUT_MILLIS,
             )
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "halt clear on endpoint ${endpoint.address} threw after failed bulk $operation", error)
+            -1
         }
+        Log.w(TAG, "bulk $operation failed; halt clear on endpoint ${endpoint.address} returned $result")
+    }
+
+    private fun ByteArray.toHexPreview(): String = joinToString(" ") { "%02x".format(it) }
+
+    private companion object {
+        const val NANOS_PER_MILLI = 1_000_000L
+
+        /** CH341A bulk endpoints report wMaxPacketSize 32; never request across a boundary. */
+        const val MAX_USB_PACKET_BYTES = 32
+
+        const val TAG = "Ch341UsbHost"
+
+        /** Milliseconds allowed for the halt-clear control transfer before recovery is abandoned. */
+        const val RECOVERY_TIMEOUT_MILLIS = 200
+
+        // USB 2.0 standard request: CLEAR_FEATURE(ENDPOINT_HALT) on one endpoint.
+        // Android exposes USB_DIR_* and USB_TYPE_* on UsbConstants but not the USB_RECIP_*
+        // recipient codes, so the recipient value is spelled out locally.
+        const val USB_REQUEST_CLEAR_FEATURE = 0x01
+        const val USB_FEATURE_ENDPOINT_HALT = 0x0000
+        const val USB_RECIP_ENDPOINT = 0x02
     }
 }

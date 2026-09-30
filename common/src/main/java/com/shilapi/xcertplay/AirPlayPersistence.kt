@@ -9,6 +9,7 @@ import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.airplay.SafeAreaCodec
 import com.shilapi.xcertplay.airplay.SafeAreaRect
+import com.shilapi.xcertplay.media.MicrophoneGain
 import com.shilapi.xcertplay.orchestration.ManualHotspotBand
 import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
 import com.shilapi.xcertplay.orchestration.MfiTarget
@@ -37,6 +38,7 @@ object AirPlayPersistence {
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
     private const val KEY_CARPLAY_ULTRA_ENABLED = "carplay_ultra_enabled"
     private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
+    private const val KEY_MICROPHONE_GAIN_PERCENT = "microphone_gain_percent"
     private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
     private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
@@ -45,6 +47,7 @@ object AirPlayPersistence {
     private const val KEY_MANUAL_HOTSPOT_CHANNEL = "manual_hotspot_channel"
     private const val KEY_MANUAL_HOTSPOT_SECURITY = "manual_hotspot_security"
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
+    private const val KEY_MORE_GESTURES_TO_SETTINGS = "more_gestures_to_settings"
     private const val KEY_MANUFACTURER = "manufacturer"
     private const val KEY_MODEL = "model"
     private const val KEY_OEM_LABEL = "oem_label"
@@ -63,6 +66,8 @@ object AirPlayPersistence {
     private const val KEY_MFI_I2C_PATH = "mfi_i2c_path"
     private const val KEY_REMOTE_MFI_SERVER = "remote_mfi_server"
     private const val KEY_REMOTE_MFI_TOKEN = "remote_mfi_token"
+    private const val KEY_LOCAL_MFI_CERTIFICATE_URI = "local_mfi_certificate_uri"
+    private const val KEY_LOCAL_MFI_PRIVATE_KEY_URI = "local_mfi_private_key_uri"
     private const val SAFE_AREA_KEY_PREFIX = "safe_area_"
     private const val CUSTOM_ICON_FILE = "airplay-icon.png"
 
@@ -124,6 +129,18 @@ object AirPlayPersistence {
             .apply()
     }
 
+    fun loadMicrophoneGainPercent(context: Context): Int =
+        MicrophoneGain.sanitize(
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getInt(KEY_MICROPHONE_GAIN_PERCENT, MicrophoneGain.DEFAULT_PERCENT),
+        )
+
+    fun saveMicrophoneGainPercent(context: Context, percent: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_MICROPHONE_GAIN_PERCENT, MicrophoneGain.sanitize(percent))
+            .apply()
+    }
+
     fun loadWirelessEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_WIRELESS_ENABLED, true)
@@ -177,6 +194,28 @@ object AirPlayPersistence {
     fun saveRemoteMfiToken(context: Context, token: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_REMOTE_MFI_TOKEN, token)
+            .apply()
+    }
+
+    fun loadLocalMfiCertificateUri(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LOCAL_MFI_CERTIFICATE_URI, null)
+            .orEmpty()
+
+    fun saveLocalMfiCertificateUri(context: Context, uri: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LOCAL_MFI_CERTIFICATE_URI, uri)
+            .apply()
+    }
+
+    fun loadLocalMfiPrivateKeyUri(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LOCAL_MFI_PRIVATE_KEY_URI, null)
+            .orEmpty()
+
+    fun saveLocalMfiPrivateKeyUri(context: Context, uri: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LOCAL_MFI_PRIVATE_KEY_URI, uri)
             .apply()
     }
 
@@ -270,6 +309,16 @@ object AirPlayPersistence {
     fun saveDebugLogsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_DEBUG_LOGS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadMoreGesturesToSettings(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MORE_GESTURES_TO_SETTINGS, false)
+
+    fun saveMoreGesturesToSettings(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_MORE_GESTURES_TO_SETTINGS, enabled)
             .apply()
     }
 

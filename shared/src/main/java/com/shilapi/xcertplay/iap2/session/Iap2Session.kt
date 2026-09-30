@@ -11,11 +11,12 @@ import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import com.shilapi.xcertplay.transport.Iap2CsmChannel
 
 /**
- * One immediately readable and writable iAP2 CSM session.
+ * One immediately readable and writable iAP2 connection facade.
  *
  * [Iap2CsmChannel] remains the lower-level frame transport. This class is the protocol-facing
- * facade used by services: it accepts endpoint builders, sends complete frames, receives complete
- * frames, and exposes the typed body reader.
+ * facade used by services: it accepts endpoint builders, sends and receives complete control
+ * frames, exposes the typed body reader, and internally carries session-12 file transfers over the
+ * same owned link.
  */
 class Iap2Session private constructor(
     private val channel: Iap2CsmChannel,
@@ -80,6 +81,13 @@ class Iap2Session private constructor(
     }
 
     fun reader(frame: Iap2Frame): Iap2BodyReader = Iap2Messages.reader(frame)
+
+    internal fun sendFileTransfer(bytes: ByteArray, timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS) {
+        channel.sendFileTransfer(bytes, timeoutMillis)
+    }
+
+    internal fun recvFileTransfer(timeoutMillis: Long): ByteArray? =
+        channel.recvFileTransfer(timeoutMillis)
 
     override fun close() {
         try {

@@ -1,15 +1,14 @@
-# xcertplay
-
-[English](README.md) | 中文
-
-`xcertplay` 是面向 Android 车机的 CarPlay 接收端项目。支持通过 CH341 I2C 桥接到 MFI 芯片，亦或是通过板载 I2C 控制器直连 MFI 芯片，支持 CarPlay 有线或无线连接。
-
-> 仍在绝赞开发中。
+<div align="center">
+  <img src="https://raw.githubusercontent.com/shilapi/xcertplay/refs/heads/master/asset/xcertplay_small.png" width="180" height="180" alt="xcertplay icon" />
+<h1><strong><font size="6">xcertplay</font></strong></h1>
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a>
+  <p>xcertplay 是面向 Android 车机的 CarPlay 接收端项目。支持通过 CH341 I2C 桥接到 MFi 芯片，亦可通过板载 I2C 控制器直连，支持 CarPlay 有线和无线连接。</p>
+</div>
 
 ## Features
 
 - 面向 Android 和 Android Automotive OS 的 CarPlay 主机应用。
-- 支持 CH341 桥接 MFI 芯片、原生 `/dev/i2c-N` 设备连接的 MFI芯片、Remote MFI 认证（API见下）。
+- 支持 CH341 桥接 MFI 芯片、原生 `/dev/i2c-N` 设备连接的 MFI 芯片、本地证书/私钥文件和 Remote MFI 认证（API 见下）。
 - 支持 CarPlay 有线或无线连接。
 - 支持触发 CarPlay Ultra （未测试/未完成的协议栈，但是确实可以在 iPhone 上触发 CarPlay Ultra 的提示）。
 - 支持语音、导航、音乐多通道音频输出并 mapping 至 Android 的对应通道。
@@ -20,8 +19,9 @@
 ## 使用方法
 
 1. 通过蓝牙将 iPhone 与车机配对。
-2. 在应用中用三指向下滑动，打开设置页面。
+2. CarPlay 视频流尚未启动时，点击右下角的设置按钮；也可以用三指向下滑动打开设置页面。
 3. 确认所有设置均已按需配置。
+   如需启用另一种手势，打开 `More gestures to Settings page`：单指从屏幕左侧 1/8 区域的上 1/4 开始，沿左侧下滑，在下 1/4 区域抬起。
 4. 滑动到底部，选择 `Save & Reconnect`。
 5. 按照你选择的方式连接 MFi 芯片。
 6. 等待连接完成，然后开始使用。
@@ -32,7 +32,15 @@
 
 转接板：[CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 
-正在 MFI 芯片转接板到货...
+## 本地 MFI 文件
+
+在 `MFI certificate & signing target` 中选择 `Local files`，然后通过两个 `Choose`
+按钮使用 Android 系统文件选择器选择证书和私钥。当前支持 DER PKCS#7 证书（`.p7b`）
+及与之匹配的、未加密 DER PKCS#8 私钥（`.pk8`）。应用会在开始连接手机前校验两者是否
+匹配，并在 MFI 重连时重新读取文件。
+
+建议把私钥放在受保护的位置。应用不会把证书或私钥复制到偏好设置，只会保存 Android
+授予的持久读取权限和文档 URI。
 
 ## 工程结构
 

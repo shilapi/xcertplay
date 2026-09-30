@@ -92,6 +92,7 @@ class AirPlaySession(
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     val localAddress: InetAddress? = socket.localAddress
+    internal val isWireless: Boolean = config.wirelessAudio
     private val peerAddress: InetAddress? = socket.inetAddress
     internal val remoteAddress: InetAddress?
         get() = (socket.remoteSocketAddress as? InetSocketAddress)?.address
@@ -396,6 +397,10 @@ class AirPlaySession(
                         "audioFormats=${(info["audioFormats"] as? List<*>)?.size ?: 0} " +
                         "audioLatencies=${(info["audioLatencies"] as? List<*>)?.size ?: 0}",
                 )
+                debugLog(
+                    "airplay /info audio=${if (config.wirelessAudio) "wireless PCM+Opus" else "wired PCM"} " +
+                        "microphone=${config.microphone}",
+                )
                 debugLog("airplay /info displays=${info["displays"]}")
                 RtspMessage.Response(
                     headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
@@ -553,6 +558,16 @@ class AirPlaySession(
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
         debugLog("airplay command type=$type keys=${params.keys.sorted()}")
+        if (type == "modesChanged") {
+            val resources = (params["resources"] as? List<*>)
+                ?.mapNotNull(::asMap)
+                ?.sortedBy { long(it["resourceID"]) ?: Long.MAX_VALUE }
+                ?.joinToString { resource ->
+                    "id=${long(resource["resourceID"])} owner=${long(resource["entity"])} " +
+                        "permanent=${long(resource["permanentEntity"])}"
+                }
+            debugLog("airplay modesChanged resources=${resources ?: "missing"}")
+        }
         if (type == "requestUI") listener.onHostUiRequested(this)
         listener.onCommand(this, type, params)
         return RtspMessage.Response(status = 200)

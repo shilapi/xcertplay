@@ -13,8 +13,8 @@ android {
         applicationId = "com.shilapi.xcertplay"
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 1302
+        versionName = "1.3.2"
 
     }
 
@@ -31,6 +31,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (providers.environmentVariable("ANDROID_KEYSTORE_PATH").isPresent) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             optimization {
                 enable = false

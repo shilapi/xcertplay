@@ -34,6 +34,9 @@ android {
 }
 dependencies {
     implementation libs.androidx.app
+    implementation libs.androidx.media3.session
+    implementation libs.androidx.media3.container
     implementation libs.bouncycastle
+    implementation libs.concentus
     testImplementation libs.junit
 }

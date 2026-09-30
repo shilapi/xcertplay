@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
+import com.shilapi.xcertplay.media.MediaCodecSupport
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -27,6 +28,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         fun onClosed(cause: Throwable?) {}
     }
 
+    private var nalLengthSize = 4
     private val closed = AtomicBoolean(false)
     private val frameCounter = AtomicLong(0)
     private val firstFrameLogged = AtomicBoolean(false)
@@ -69,7 +71,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
             while (!closed.get()) {
                 val header = readFully(input, HEADER_LEN) ?: break
                 val bodySize = readU32Le(header, 0)
-                if (bodySize > MAX_BODY) break
+                if (bodySize < 0 || bodySize > MAX_BODY) break
                 val body = readFully(input, bodySize) ?: break
                 onMessage(header, body)
             }
@@ -98,11 +100,15 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                         "head=${payload.hexPrefix(16)}",
                     )
                 }
-                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload))
+                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload, nalLengthSize))
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
                 Log.i(TAG, "video codec config codec=$codec body=${body.size} data=${codecData.size}")
+                val lengthOffset = if (codec == VideoCodec.H265) 21 else 4
+                require(codecData.size > lengthOffset) { "Truncated video configuration" }
+                nalLengthSize = (codecData[lengthOffset].toInt() and 3) + 1
+                require(nalLengthSize != 3) { "Reserved NAL length size" }
                 listener.onCodec(codec)
                 listener.onConfig(codecData)
             }
@@ -140,34 +146,14 @@ object ScreenCodec {
         if (body.size < TAG_SIZE) body
         else AirPlayCrypto.chachaOpen(key, AirPlayCrypto.nonce64(counter), body, header)
 
-    /**
-     * Replaces each four-byte NAL length with an Annex B start code in place.
-     *
-     * The payload is left untouched unless every length-prefixed NAL is valid, so malformed
-     * input keeps its original bytes for the normal decoder error path.
-     */
-    fun lengthPrefixedToAnnexB(payload: ByteArray): ByteArray {
-        if (payload.size < 4 || payload.startsWithStartCode()) return payload
-
-        var offset = 0
-        while (offset + 4 <= payload.size) {
-            val length = readU32Be(payload, offset)
-            offset += 4
-            if (length <= 0 || offset + length > payload.size) return payload
-            offset += length
+    /** The wire format is length-prefixed, even when its first length happens to be one. */
+    fun lengthPrefixedToAnnexB(payload: ByteArray, lengthSize: Int = 4): ByteArray {
+        val converted = MediaCodecSupport.toAnnexB(payload, lengthSize, allowAnnexB = false)
+        if (converted.size == payload.size) {
+            converted.copyInto(payload)
+            return payload
         }
-        if (offset != payload.size) return payload
-
-        offset = 0
-        while (offset + 4 <= payload.size) {
-            val length = readU32Be(payload, offset)
-            payload[offset] = 0
-            payload[offset + 1] = 0
-            payload[offset + 2] = 0
-            payload[offset + 3] = 1
-            offset += 4 + length
-        }
-        return payload
+        return converted
     }
 
     fun detectConfig(payload: ByteArray): Pair<VideoCodec, ByteArray> {
@@ -194,19 +180,6 @@ object ScreenCodec {
 
     const val TAG_SIZE = 16
 }
-
-private fun ByteArray.startsWithStartCode(): Boolean =
-    size >= 4 &&
-        this[0] == 0.toByte() &&
-        this[1] == 0.toByte() &&
-        this[2] == 0.toByte() &&
-        this[3] == 1.toByte()
-
-private fun readU32Be(source: ByteArray, offset: Int): Int =
-    ((source[offset].toInt() and 0xff) shl 24) or
-        ((source[offset + 1].toInt() and 0xff) shl 16) or
-        ((source[offset + 2].toInt() and 0xff) shl 8) or
-        (source[offset + 3].toInt() and 0xff)
 
 private fun readU32Le(source: ByteArray, offset: Int): Int =
     (source[offset].toInt() and 0xff) or

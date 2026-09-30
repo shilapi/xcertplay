@@ -18,23 +18,47 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.SocketException
 import java.net.UnknownHostException
-import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+
+internal data class WifiP2pCredentials(
+    val ssid: String,
+    val passphrase: String,
+)
+
+internal fun mfiCertificateWifiP2pCredentials(certificate: ByteArray): WifiP2pCredentials {
+    require(certificate.isNotEmpty()) { "MFi certificate must not be empty" }
+    val digest = MessageDigest.getInstance("SHA-1").digest(certificate)
+    val digestHex = buildString(digest.size * 2) {
+        for (byte in digest) {
+            val value = byte.toInt() and 0xff
+            append(HEX_DIGITS[value ushr 4])
+            append(HEX_DIGITS[value and 0x0f])
+        }
+    }
+    return WifiP2pCredentials(
+        ssid = WIFI_P2P_SSID_PREFIX + digestHex.take(MFI_CERTIFICATE_SSID_SUFFIX_LENGTH),
+        passphrase = digestHex.takeLast(MFI_CERTIFICATE_PASSPHRASE_LENGTH),
+    )
+}
 
 /**
  * Creates a temporary 5 GHz Wi-Fi Direct group owner that can also be joined as a legacy AP.
  *
  * The group is deliberately not persistent. [close] removes it and releases the callback thread.
  */
-class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
+class WifiP2pGroupManager(
+    context: Context,
+    private val networkName: String,
+    private val passphrase: String,
+) : WirelessHotspotManager {
     private val appContext = context.applicationContext
     private val p2pManager = appContext.getSystemService(WifiP2pManager::class.java)
         ?: throw IllegalStateException("WifiP2pManager is unavailable")
     private val stateLock = Object()
-    private val random = SecureRandom()
 
     private var channel: WifiP2pManager.Channel? = null
     private var callbackThread: HandlerThread? = null
@@ -63,7 +87,7 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         val thread = HandlerThread("xcertplay-wifi-p2p").apply { start() }
         attempt.thread = thread
         val deadlineNanos = deadlineAfter(timeoutMillis)
-        val credentials = randomCredentials()
+        val credentials = WifiP2pCredentials(networkName, passphrase)
 
         try {
             val p2pChannel = p2pManager.initialize(
@@ -206,7 +230,7 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
     private fun awaitUsableGroup(
         attempt: StartAttempt,
         channel: WifiP2pManager.Channel,
-        credentials: Credentials,
+        credentials: WifiP2pCredentials,
         deadlineNanos: Long,
         timeoutMillis: Long,
     ): WirelessHotspotInfo {
@@ -360,23 +384,18 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
             WifiP2pGroup.SECURITY_TYPE_WPA3_COMPATIBILITY ->
                 Iap2WirelessSecurity.WPA3_TRANSITION
             WifiP2pGroup.SECURITY_TYPE_WPA3_SAE -> Iap2WirelessSecurity.WPA3_ONLY
-            else -> throw IOException(
-                "Unsupported Wi-Fi P2P security type: ${group.securityType}",
-            )
-        }
-    }
-
-    private fun randomCredentials(): Credentials = Credentials(
-        ssid = "DIRECT-xc${randomToken(4)}",
-        passphrase = randomToken(16),
-    )
-
-    private fun randomToken(length: Int): String =
-        buildString(length) {
-            repeat(length) {
-                append(TOKEN_ALPHABET[random.nextInt(TOKEN_ALPHABET.length)])
+            // Vendor frameworks can leave the type unset (-1) even after a successful
+            // createGroup. Groups created here always use a WPA2-PSK passphrase, so an
+            // unreported type must not fail the start and tear the group down.
+            else -> {
+                Log.w(
+                    TAG,
+                    "Unreported Wi-Fi P2P security type ${group.securityType}, assuming WPA2-PSK",
+                )
+                Iap2WirelessSecurity.WPA_WPA2
             }
         }
+    }
 
     private fun ensureStartActive(attempt: StartAttempt) {
         synchronized(stateLock) {
@@ -480,17 +499,15 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         var stopped = false
     }
 
-    private class Credentials(
-        val ssid: String,
-        val passphrase: String,
-    )
-
     private companion object {
         const val TAG = "xcertplay-usb"
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val REMOVE_GROUP_TIMEOUT_MILLIS = 2_000L
         val REQUEST_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(500)
-        const val TOKEN_ALPHABET =
-            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
     }
 }
+
+private const val WIFI_P2P_SSID_PREFIX = "DIRECT-xcertplay"
+private const val MFI_CERTIFICATE_SSID_SUFFIX_LENGTH = 4
+private const val MFI_CERTIFICATE_PASSPHRASE_LENGTH = 8
+private const val HEX_DIGITS = "0123456789abcdef"

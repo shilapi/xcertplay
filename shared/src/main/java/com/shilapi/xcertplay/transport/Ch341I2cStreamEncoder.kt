@@ -11,6 +11,12 @@ enum class Ch341I2cSpeed(internal val command: Int, internal val bitsPerSecond: 
 /**
  * Encodes a complete CH341 I2C transaction.
  *
+ * Every byte written to the bus is emitted as its own bare `0x80` command. A bare `0x80` is the
+ * only form the controller answers with an ACK/NACK status byte, which is what lets
+ * [Ch341I2cTransport] see a NACKed register select; a batched `0x80|n` write is answered with no
+ * status bytes at all. The number of written bytes is unchanged, so the transport's
+ * "one status byte per written byte" model stays exact.
+ *
  * A transaction may contain several 32-byte CH341 stream segments. Intermediate segments end
  * with `00` and padding, but deliberately omit STOP so the I2C transaction continues in the next
  * segment. The final segment contains STOP followed by `00`.
@@ -50,9 +56,13 @@ object Ch341I2cStreamEncoder {
             bytes += value.toByte()
         }
         fun write(address: Byte, data: ByteArray) {
-            add(WRITE + data.size + 1)
+            // One bare `0x80` per byte: the controller answers that form with ACK/NACK status.
+            add(WRITE)
             add(address.toInt() and 0xff)
-            data.forEach { add(it.toInt() and 0xff) }
+            data.forEach {
+                add(WRITE)
+                add(it.toInt() and 0xff)
+            }
         }
 
         add(STREAM_START)
@@ -108,30 +118,21 @@ object Ch341I2cStreamEncoder {
         }
 
         fun write(address: Byte, data: ByteArray) {
-            var offset = 0
-            var includeAddress = true
-            while (includeAddress || offset < data.size) {
-                val overhead = if (includeAddress) 2 else 1
-                val dataCapacity = MAX_STREAM_PACKET_BYTES - STREAM_END_BYTES - segment.size - overhead
-                if (dataCapacity <= 0) {
-                    if (includeAddress) {
-                        command(bytes(WRITE + 1, address.toInt() and 0xff))
-                        includeAddress = false
-                        continue
-                    }
-                    finishIntermediate()
-                    continue
-                }
-                val count = minOf(data.size - offset, dataCapacity, MAX_WRITE_COMMAND_BYTES - if (includeAddress) 1 else 0)
-                val commandLength = count + if (includeAddress) 1 else 0
-                val bytes = ByteArray(1 + commandLength)
-                bytes[0] = (WRITE + commandLength).toByte()
-                var index = 1
-                if (includeAddress) bytes[index++] = address
-                data.copyInto(bytes, index, offset, offset + count)
-                command(bytes)
-                offset += count
-                includeAddress = false
+            if (data.isEmpty()) {
+                // Address-only write: the read-address setup of a segmented read. Emit it as ONE
+                // batched `0x80|1` command, which suppresses the ACK/NACK status byte. This is the
+                // form the hardware-proven reference implementation uses: mfi3.py's seg_read_packets
+                // emits `[START, OUT | 1, address]` and then requires the accumulated reply to total
+                // exactly the requested data length, with no status byte in front of it. Emitting a
+                // bare `0x80` here instead adds a status byte and shifts the whole answer.
+                command(byteArrayOf((WRITE + 1).toByte(), address))
+                return
+            }
+            // Writes that carry data keep one bare `0x80` per byte so that
+            // [Ch341I2cTransport] can still check each byte's ACK/NACK status.
+            command(byteArrayOf(WRITE.toByte(), address))
+            data.forEach { value ->
+                command(byteArrayOf(WRITE.toByte(), value))
             }
         }
 
@@ -158,8 +159,6 @@ object Ch341I2cStreamEncoder {
             if (segment.size + bytes.size + STREAM_END_BYTES > MAX_STREAM_PACKET_BYTES) finishIntermediate()
             segment += bytes.toList()
         }
-
-        private fun bytes(vararg values: Int): ByteArray = ByteArray(values.size) { values[it].toByte() }
 
         private fun finishIntermediate() {
             segment += STREAM_END.toByte()

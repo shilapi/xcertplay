@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import java.net.InetAddress
+import java.net.Inet4Address
 
 /** Everything one captured microphone stream needs to send samples to the phone. */
 data class MicrophoneConfig(
@@ -16,19 +17,17 @@ data class MicrophoneConfig(
     val bitrate: Int? = null,
 ) {
     val samplesPerPacket: Int
-        get() = if (codec == AudioCodecKind.OPUS) {
-            OPUS_SAMPLES_PER_PACKET
-        } else {
-            maxOf(1, sampleRate * frameMillis / 1000)
-        }
+        get() = maxOf(1, sampleRate * frameMillis / 1000)
+
+    val rtpSamplesPerPacket: Int
+        get() = if (codec == AudioCodecKind.OPUS) 48_000 * frameMillis / 1000 else samplesPerPacket
 
     val frameBytes: Int
         get() = samplesPerPacket * channels * 2
-
-    private companion object {
-        const val OPUS_SAMPLES_PER_PACKET = 960
-    }
 }
+
+internal fun microphoneBindAddress(peer: InetAddress): InetAddress =
+    InetAddress.getByName(if (peer is Inet4Address) "0.0.0.0" else "::")
 
 /** Mutable RTP/ChaCha counters for one microphone uplink. */
 class MicrophoneCounters(
@@ -38,7 +37,7 @@ class MicrophoneCounters(
 )
 
 /**
- * Seals one PCM microphone frame in the wired CarPlay RTP layout.
+ * Seals one microphone frame in the CarPlay RTP layout.
  *
  * The 12-byte RTP header is clear; its timestamp and SSRC are authenticated as AAD. The packet
  * tail repeats the eight-byte little-endian nonce counter after the 16-byte Poly1305 tag.

@@ -15,7 +15,13 @@ local.properties
 captures/
 
 # Local agent working notes
-/agent_docs/
+agent_docs/
+research/
+
+tools/
+mobile/release/
+mobile/debug/
+
 
 # Local dev using folder
 tools/

@@ -7,8 +7,9 @@ import java.util.ArrayDeque
  * The iAP2 link layer, deliberately kept independent from I/O, threads, CSM, and media.
  *
  * The caller supplies a monotonic millisecond clock, writes [takeOutput] to its byte stream, and
- * feeds arbitrary receive fragments back through [feed].  This class only exposes control-session
- * (session 10) bytes.  It does not open a Lockdown connection or own a [BlockingDuplexByteStream].
+ * feeds arbitrary receive fragments back through [feed].  This class exposes control-session
+ * (session 10) and file-transfer-session (session 12) bytes. It does not open a Lockdown
+ * connection or own a [BlockingDuplexByteStream].
  *
  * An inbound wire frame is limited to the largest u16 length (`65535` bytes total).  Pending
  * outbound and out-of-order packets are additionally capped by [Iap2LinkConfig] (64 by default).
@@ -28,6 +29,7 @@ class Iap2LinkEngine(
 
     sealed class Event {
         data class Control(val bytes: ByteArray) : Event()
+        data class FileTransfer(val bytes: ByteArray) : Event()
         data class Writable(val value: Boolean) : Event()
         data class Dead(val reason: String?) : Event()
     }
@@ -242,15 +244,24 @@ class Iap2LinkEngine(
 
     /** Queues a complete raw control-session payload (session id 10). */
     fun sendControl(bytes: ByteArray, nowMillis: Long) {
+        sendSession(CONTROL_SESSION_ID, bytes, nowMillis)
+    }
+
+    /** Queues one complete file-transfer datagram (session id 12). */
+    fun sendFileTransfer(bytes: ByteArray, nowMillis: Long) {
+        sendSession(FILE_TRANSFER_SESSION_ID, bytes, nowMillis)
+    }
+
+    private fun sendSession(sessionId: Int, bytes: ByteArray, nowMillis: Long) {
         require(bytes.size <= MAX_PAYLOAD_BYTES) {
-            "iAP2 control payload exceeds $MAX_PAYLOAD_BYTES bytes"
+            "iAP2 session payload exceeds $MAX_PAYLOAD_BYTES bytes"
         }
         if (peerSynchronizationReceived || state == State.NORMAL) {
             require(peerPayloadIsAcceptable(bytes)) {
-                "iAP2 control payload exceeds peer maxLength ${peerSynchronization.maxLength}"
+                "iAP2 session payload exceeds peer maxLength ${peerSynchronization.maxLength}"
             }
         }
-        sendPacket(Packet(0, CONTROL_SESSION_ID, bytes.copyOf()), nowMillis)
+        sendPacket(Packet(0, sessionId, bytes.copyOf()), nowMillis)
     }
 
     private fun parseAvailable(nowMillis: Long): Boolean {
@@ -427,7 +438,10 @@ class Iap2LinkEngine(
         while (outOfOrder.isNotEmpty() && sequenceDistance(outOfOrder.first().sequence, lastReceivedInOrder) == 1) {
             val inOrder = outOfOrder.removeAt(0)
             lastReceivedInOrder = inOrder.sequence
-            if (inOrder.sessionId == CONTROL_SESSION_ID) enqueueEvent(Event.Control(inOrder.payload))
+            when (inOrder.sessionId) {
+                CONTROL_SESSION_ID -> enqueueEvent(Event.Control(inOrder.payload))
+                FILE_TRANSFER_SESSION_ID -> enqueueEvent(Event.FileTransfer(inOrder.payload))
+            }
         }
 
         if (peerSynchronization.maxAcknowledgements == 0) return
@@ -576,6 +590,7 @@ class Iap2LinkEngine(
         sessions = listOf(
             SessionDescriptor(CONTROL_SESSION_ID, 0, config.controlSessionVersion),
             SessionDescriptor(EA_SESSION_ID, 2, 1),
+            // Now Playing artwork attribute 26 requires a version-2 File Transfer session.
             SessionDescriptor(FILE_TRANSFER_SESSION_ID, 1, 2),
         ),
     )

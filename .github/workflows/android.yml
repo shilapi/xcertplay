@@ -39,7 +39,36 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Prepare signing key
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in RELEASE_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required GitHub Actions secret for ${name}" >&2
+              exit 1
+            fi
+          done
+
+          keystore_path="${RUNNER_TEMP}/xcertplay-release.jks"
+          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
+          keytool -list \
+            -keystore "${keystore_path}" \
+            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            -alias "${ANDROID_KEY_ALIAS}" >/dev/null
+          echo "ANDROID_KEYSTORE_PATH=${keystore_path}" >> "${GITHUB_ENV}"
+
       - name: Test, lint, and build dev APKs
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: >-
           ./gradlew
           :shared:testDebugUnitTest
@@ -49,6 +78,37 @@ jobs:
           :mobile:assembleDebug
           :automotive:assembleDebug
           --stacktrace
+
+      - name: Verify signed debug APKs
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+
+          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          expected_cert="$(keytool -exportcert \
+            -keystore "${ANDROID_KEYSTORE_PATH}" \
+            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            -alias "${ANDROID_KEY_ALIAS}" | sha256sum | cut -d ' ' -f 1)"
+
+          for apk in mobile/build/outputs/apk/debug/mobile-debug.apk automotive/build/outputs/apk/debug/automotive-debug.apk; do
+            signer_info="$("${apksigner}" verify --verbose --print-certs "${apk}")"
+            echo "${signer_info}"
+            actual_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "${signer_info}")"
+            test "${actual_cert,,}" = "${expected_cert,,}"
+          done
+
+      - name: Upload signed debug APKs
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apks-${{ github.sha }}
+          path: |
+            mobile/build/outputs/apk/debug/mobile-debug.apk
+            automotive/build/outputs/apk/debug/automotive-debug.apk
+          if-no-files-found: error
 
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -79,7 +139,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Prepare release signing key
+      - name: Prepare signing key
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}

@@ -1,18 +1,16 @@
-# xcertplay
-
-English | [中文](README.zh-CN.md)
-
-`xcertplay` is an Android head-unit CarPlay receiver. It supports connecting to
-the MFI chip through a CH341 I2C bridge or directly through the board's I2C
-controller, and supports both wired and wireless CarPlay connections.
-
-> Still under active development.
+<div align="center">
+  <img src="https://raw.githubusercontent.com/shilapi/xcertplay/refs/heads/master/asset/xcertplay_small.png" width="180" height="180" alt="xcertplay icon" />
+<h1><strong><font size="6">xcertplay</font></strong></h1>
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a>
+  <p>An Android head-unit CarPlay receiver. It supports connecting to the MFi chip through a CH341 I2C bridge or directly through the board's I2C controller, and supports both wired and wireless CarPlay connections.</p>
+</div>
 
 ## Features
 
 - CarPlay host applications for Android and Android Automotive OS.
 - Support for MFI chips connected through a CH341 bridge or native
-  `/dev/i2c-N` devices, and Remote MFI authentication (see the API below).
+  `/dev/i2c-N` devices, local certificate/private-key files, and Remote MFI
+  authentication (see the API below).
 - Wired and wireless CarPlay connections.
 - CarPlay Ultra triggering (the protocol stack is untested/incomplete, but it
   can trigger the CarPlay Ultra prompt on an iPhone).
@@ -26,8 +24,9 @@ controller, and supports both wired and wireless CarPlay connections.
 ## Usage
 
 1. Pair your iPhone with the head unit via Bluetooth.
-2. In the app, swipe down with three fingers to open the Settings page.
+2. Before a CarPlay video stream starts, tap the Settings button in the lower-right corner. You can also swipe down with three fingers to open Settings.
 3. Make sure all the settings are configured as desired.
+   To enable another entry gesture, turn on `More gestures to Settings page`. Start with one finger in the upper quarter of the left eighth of the screen, slide down along that strip, and lift in the lower quarter.
 4. Scroll to the bottom and select `Save & Reconnect`.
 5. Connect your MFi chip using the method you selected.
 6. Wait for the connection to complete, then enjoy.
@@ -42,7 +41,18 @@ payloads; screen and audio media payloads are not written.
 
 Adapter board: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 
-Waiting for the MFI chip adapter board to arrive...
+## Local MFI files
+
+Choose `Local files` under `MFI certificate & signing target`, then use the two
+`Choose` buttons to select the certificate and private key with Android's system
+document picker. The supported formats are a DER PKCS#7 certificate (`.p7b`)
+and its matching, unencrypted DER PKCS#8 private key (`.pk8`). The app validates
+that the files match before starting the phone connection and reloads them on
+MFI reconnect.
+
+Store the private key in a protected location. Neither file is copied into app
+preferences; only Android's persistent read permission and document URI are
+saved.
 
 ## Project structure
 

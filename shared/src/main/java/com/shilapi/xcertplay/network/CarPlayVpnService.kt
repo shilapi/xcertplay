@@ -41,7 +41,7 @@ class CarPlayVpnService : VpnService() {
     }
 
     private data class AirPlayAttachment(
-        val address: InetAddress,
+        val bindAddress: InetAddress,
         val config: AirPlayConfig,
         val identity: AirPlayIdentity,
         val pairings: PairingStore,
@@ -120,7 +120,6 @@ class CarPlayVpnService : VpnService() {
      */
     @Synchronized
     fun attachWireless(
-        bindAddress: InetAddress,
         config: AirPlayConfig,
         identity: AirPlayIdentity,
         pairings: PairingStore,
@@ -137,7 +136,15 @@ class CarPlayVpnService : VpnService() {
         return try {
             startAirPlayServer(
                 generation,
-                AirPlayAttachment(bindAddress, config, identity, pairings, mfi, listener, media),
+                AirPlayAttachment(
+                    InetAddress.getByName("::"),
+                    config,
+                    identity,
+                    pairings,
+                    mfi,
+                    listener,
+                    media,
+                ),
             )
             AttachResult.Started
         } catch (error: Exception) {
@@ -164,7 +171,8 @@ class CarPlayVpnService : VpnService() {
         replacement: AirPlayAttachment,
     ) {
         val server = ServerSocket()
-        server.bind(InetSocketAddress(replacement.address, replacement.config.port))
+        server.bind(InetSocketAddress(replacement.bindAddress, replacement.config.port))
+        Log.i(TAG, "airplay listener bound=${server.localSocketAddress}")
         attachment = replacement
         serverSocket = server
         Thread(

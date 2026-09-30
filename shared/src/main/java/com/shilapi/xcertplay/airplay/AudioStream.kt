@@ -190,6 +190,14 @@ class AudioStream(
 
 /** Maps the phone's negotiated audioFormat bits to a decode/render format. */
 object AudioStreamCodec {
+    /** Opus input uses the selected rate; its RTP timestamp clock remains 48 kHz. */
+    fun opusCaptureRate(bits: Long): Int = when {
+        bits and 0x40000000L != 0L -> 48_000
+        bits and 0x20000000L != 0L -> 24_000
+        bits and 0x10000000L != 0L -> 16_000
+        else -> 48_000
+    }
+
     fun fromFormatBits(bits: Long, payloadType: Int, audioType: String = "media"): AudioFormat {
         val isAacLc = (bits and (AAC_LC_44K_STEREO or AAC_LC_48K_STEREO)) != 0L
         val isOpus = (bits and OPUS_MONO) != 0L
