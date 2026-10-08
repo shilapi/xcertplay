@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">xcertplay</string>
+    <string name="usb_auto_confirm_title">自动确认 USB 权限</string>
+    <string name="usb_auto_confirm_subtitle">有线连接 iPhone 时自动确认系统 USB 权限弹窗（需要无障碍服务）</string>
+    <string name="usb_auto_confirm_desc">在出现 CarPlay USB 权限弹窗时自动勾选默认并点击确定</string>
+</resources>

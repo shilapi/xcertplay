@@ -935,6 +935,19 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+        content.addView(
+            settingsSwitchRow(
+                label = getString(R.string.usb_auto_confirm_title),
+                checked = UsbAutoConfirmService.isEnabled(this),
+                description = getString(R.string.usb_auto_confirm_subtitle),
+            ) {
+                openAccessibilitySettings()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
 
         content.addView(
             settingsCategoryHeader("Audio"),
@@ -2250,6 +2263,18 @@ class CarPlayHostActivity : ComponentActivity() {
         } catch (error: SecurityException) {
             appendLog("Cannot open system Bluetooth settings: ${error.message}")
             Toast.makeText(this, "Cannot open system Bluetooth settings", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        } catch (error: ActivityNotFoundException) {
+            appendLog("System Accessibility settings are unavailable: ${error.message}")
+            Toast.makeText(this, "System Accessibility settings are unavailable", Toast.LENGTH_LONG).show()
+        } catch (error: SecurityException) {
+            appendLog("Cannot open system Accessibility settings: ${error.message}")
+            Toast.makeText(this, "Cannot open system Accessibility settings", Toast.LENGTH_LONG).show()
         }
     }
 

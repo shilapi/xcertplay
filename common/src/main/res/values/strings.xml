@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">xcertplay</string>
+    <string name="usb_auto_confirm_title">Auto-confirm USB permission</string>
+    <string name="usb_auto_confirm_subtitle">Automatically accept the Android USB permission prompt when an iPhone is connected via cable (requires Accessibility Service)</string>
+    <string name="usb_auto_confirm_desc">Automatically checks Always allow and confirms the Android USB accessory prompt for CarPlay</string>
 </resources>
