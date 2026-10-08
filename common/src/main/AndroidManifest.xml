@@ -5,6 +5,10 @@
 
     <application>
 
+        <meta-data
+            android:name="android.allow_multiple_resumed_activities"
+            android:value="true" />
+
         <activity
             android:name="com.shilapi.xcertplay.CarPlayHostActivity"
             android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
@@ -12,6 +16,7 @@
             android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
+            android:supportsPictureInPicture="true"
             android:theme="@style/Theme.Xcertplay"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -30,11 +35,13 @@
         <activity
             android:name="com.shilapi.xcertplay.MainActivity"
             android:exported="true"
+            android:resizeableActivity="true"
             android:theme="@style/Theme.Xcertplay" />
 
         <activity
             android:name="com.shilapi.xcertplay.ImageCropActivity"
             android:exported="false"
+            android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
             android:theme="@style/Theme.Xcertplay" />
 
