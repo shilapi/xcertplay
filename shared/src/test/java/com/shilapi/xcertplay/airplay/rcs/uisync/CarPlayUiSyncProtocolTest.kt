@@ -142,10 +142,10 @@ class CarPlayUiSyncProtocolTest {
             packetSequenceNumber = 0,
             acknowledgementSequenceNumber = 0,
         )
-        val missingNoAck = LinkedHashMap(valid.toWireMap()).apply { remove("noAck") }
+        val malformedNoAck = LinkedHashMap(valid.toWireMap()).apply { put("noAck", "false") }
 
         assertThrows(CarPlayUiSyncProtocolException::class.java) {
-            CarPlayUiSyncMessageFactory.decodeWireValue(missingNoAck)
+            CarPlayUiSyncMessageFactory.decodeWireValue(malformedNoAck)
         }
         assertThrows(CarPlayUiSyncProtocolException::class.java) {
             CarPlayUiSyncMessageFactory.decodeWireValue(

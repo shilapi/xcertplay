@@ -98,20 +98,27 @@ data class AirPlayFeatureProposal(
         .distinct()
         .mapNotNull { AirPlayFeatureCatalog.find(it) }
         .filterTo(linkedSetOf()) { capabilities.supports(it) }
+        .apply {
+            if (capabilities.supports(AirPlayFeature.UI_CONTEXT) &&
+                ((AirPlayFeature.ALT_SCREEN in this) != (AirPlayFeature.UI_CONTEXT in this))) {
+                remove(AirPlayFeature.ALT_SCREEN); remove(AirPlayFeature.UI_CONTEXT)
+            }
+        }
 
     val supportedFeatures: List<String>
         get() = capabilities.supportedFeatures
 
     val enabledFeatures: List<String> = requestedFeatures
         .distinct()
-        .filter { capabilities.supports(it) }
+        .filter { AirPlayFeatureCatalog.find(it) in enabledFeatureSet }
 }
 
 /**
  * Builds and applies the receiver-side AirPlay string feature negotiation.
  *
- * `/info` is emitted before SETUP and therefore advertises sidecar structures independently. This
- * factory only decides which proposed strings are safe to acknowledge in `enabledFeatures`.
+ * `/info` can precede or follow control SETUP. Before SETUP it advertises capabilities; after
+ * SETUP its sidecars and alternate display must match the accepted `enabledFeatures`.
+ * This factory decides which proposed strings are safe to acknowledge in `enabledFeatures`.
  */
 object AirPlayFeatureNegotiation {
     fun requestedFeatures(value: Any?): List<String> {

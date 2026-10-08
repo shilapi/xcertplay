@@ -33,6 +33,7 @@ class Iap2WirelessControlClient(
         require(identification.wireless != null) {
             "Wireless control requires an Iap2IdentificationConfig with wireless transport"
         }
+        Iap2CarPlayThemeContract.validateIdentification(identification, endpoint.sdkVersion, endpoint.clusterAsset)
         require(
             bringUpTimeoutMillis == NO_TIMEOUT_MILLIS ||
                 bringUpTimeoutMillis in 1..MAX_TIMEOUT_MILLIS,
@@ -45,9 +46,13 @@ class Iap2WirelessControlClient(
         } else {
             deadlineAfter(bringUpTimeoutMillis)
         }
+        require(!identification.locationInformationEnabled || locationProvider != null) {
+            "LocationInformation cannot be declared without a location provider"
+        }
         Iap2IdentificationClient(session).identify(
-            identification,
+            mfi.identification(identification),
             requireRemaining(bringUpDeadlineNanos),
+            onTrace = onProgress,
         )
         onProgress("iap2 identification accepted")
         var stage = Iap2WirelessControlStage.IDENTIFIED
@@ -68,6 +73,10 @@ class Iap2WirelessControlClient(
         var preTransportWiFiConfigurationsSent = 0
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
+        val ultraRelay = com.shilapi.xcertplay.iap2.message.Iap2UltraRelaySession(
+            respond = { mfi.validateUltraReply(it); session.send(it, 5_000) }, authenticate = { mfi.handleUltra(it, onProgress) },
+            accessoryInformation = mapOf(0 to identification.name, 1 to identification.modelIdentifier,
+                2 to identification.manufacturer), trace = { onProgress("TRACE $it") })
         var wirelessCarPlayAvailableSeen = false
         var locationActive = false
         var locationSentLogged = false
@@ -111,6 +120,10 @@ class Iap2WirelessControlClient(
                     continue
                 }
 
+                if (mfi.supportsUltra(incoming.messageId)) {
+                    mfi.validateUltraIncoming(incoming)
+                    if (ultraRelay.handle(incoming)) continue
+                }
                 when (incoming.messageId) {
                     REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
                         onProgress("iap2 rx=0x5702 request-wifi-configuration")
@@ -150,7 +163,9 @@ class Iap2WirelessControlClient(
                     }
 
                     CARPLAY_AVAILABILITY -> {
-                        onProgress("iap2 rx=0x4300 carplay-availability")
+                        val availability = Iap2CarPlayMessages.availability(incoming)
+                        onProgress("iap2 rx=0x4300 availability=$availability")
+                        if (availability.wireless?.available != true) continue
                         sendDuringControl(carPlayStartSession(endpoint))
                         stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
                         carPlayStartSessionsSent++
@@ -170,7 +185,7 @@ class Iap2WirelessControlClient(
                         onProgress(
                             "iap2 rx=0x4e0e device-transport-identifier " +
                                 "bluetooth=${identifiers.bluetoothMac ?: "none"} " +
-                                "usb=${identifiers.usbTransportIdentifier ?: "none"}; " +
+                                "iphoneUDID=${identifiers.iphoneUdid ?: "none"}; " +
                                 "resending 0x5703",
                         )
                         if (
@@ -196,6 +211,11 @@ class Iap2WirelessControlClient(
                     }
 
                     Iap2LocationMessages.START_LOCATION_INFORMATION -> {
+                        if (!identification.locationInformationEnabled) {
+                            onProgress("iap2 0xfffa ignored: LocationInformation was not declared")
+                            continue
+                        }
+                        if (locationActive) { onProgress("iap2 duplicate location start ignored"); continue }
                         onProgress("iap2 rx=0xfffa start-location-information")
                         locationActive = startLocationUpdates(locationProvider, onProgress)
                         locationSentLogged = false
@@ -207,9 +227,9 @@ class Iap2WirelessControlClient(
 
                     Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
                         onProgress("iap2 rx=0xfffc stop-location-information")
+                        if (locationActive) locationProvider?.stop()
                         locationActive = false
                         locationSentLogged = false
-                        locationProvider?.stop()
                     }
 
                     else -> {
@@ -220,7 +240,7 @@ class Iap2WirelessControlClient(
                 }
             }
         } finally {
-            locationProvider?.stop()
+            if (locationActive) locationProvider?.stop()
             if (hidStarted && !session.isClosed) {
                 runCatching {
                     session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
@@ -306,6 +326,9 @@ class Iap2WirelessControlClient(
                 deviceIdentifier = endpoint.deviceIdentifier,
                 publicKey = endpoint.publicKey,
                 sourceVersion = endpoint.sourceVersion,
+                sdkVersion = endpoint.sdkVersion,
+                clusterAsset = endpoint.clusterAsset,
+                mutualAuth = endpoint.mutualAuthenticationSupported,
             )
 
         private fun later(
@@ -352,10 +375,14 @@ class Iap2WirelessCarPlayEndpoint(
     val deviceIdentifier: String,
     val publicKey: String,
     val sourceVersion: String,
+    val sdkVersion: String? = null,
+    val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
+    val mutualAuthenticationSupported: Boolean? = null,
 ) {
     val ipAddresses: List<String> = ipAddresses.toList()
 
     init {
+        Iap2CarPlayThemeContract.validateAssetInformation(sdkVersion, clusterAsset)
         require(ssid.isNotBlank()) { "ssid is required and must not be blank" }
         require('\u0000' !in ssid) { "ssid must not contain U+0000" }
         require('\u0000' !in passphrase) { "passphrase must not contain U+0000" }

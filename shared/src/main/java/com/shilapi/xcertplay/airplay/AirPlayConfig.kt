@@ -23,6 +23,23 @@ data class AirPlayDisplayConfig(
     val safeArea: AirPlayInsets? = null,
     val safeAreaDrawOutside: Boolean? = null,
     val initialUrl: String? = null,
+    val viewAreas: List<AirPlayViewAreaConfig> = emptyList(),
+    val initialViewArea: Int = 0,
+    val adjacentViewAreas: List<Int> = emptyList(),
+)
+
+/** Explicit multi-view geometry; safeArea remains optional for corner-mask views. */
+data class AirPlayViewAreaConfig(
+    val index: Int,
+    val widthPixels: Int,
+    val heightPixels: Int,
+    val originXPixels: Int = 0,
+    val originYPixels: Int = 0,
+    val safeArea: Map<String, Any?>? = null,
+    val transitionControl: Int = 0,
+    val statusBarEdge: Int = 0,
+    val supportsFocusTransfer: Boolean = false,
+    val cornerMasks: Map<String, Any?>? = null,
 )
 
 /** One OEM homescreen icon. */
@@ -213,6 +230,10 @@ data class AirPlayUltraConfig(
     val sessionManagementInfo: Map<String, Any?>? = null,
     val readyFeatures: Set<AirPlayFeature> = emptySet(),
     val runtime: AirPlayUltraRuntime? = null,
+    val sdkVersion: String = "1.0",
+    val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
+    /** Display plugin UID from the loaded OEM package; distinct from the logical stream UUID. */
+    val clusterDisplayPluginId: String? = null,
 )
 
 /** Immutable accessory configuration consumed by the AirPlay session server. */

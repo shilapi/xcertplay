@@ -23,6 +23,10 @@ interface MfiAuthenticator {
     val certificateType: MfiCertificateType
         get() = MfiCertificateType.MFI
 
+    /** Explicit MFi4 endpoint contract. Empty means this provider implements only legacy authentication. */
+    val mfi4SentMessages: Set<Int> get() = emptySet()
+    val mfi4ReceivedMessages: Set<Int> get() = emptySet()
+
     fun protocolMajor(): Int
 
     fun readCertificate(
@@ -30,6 +34,10 @@ interface MfiAuthenticator {
     ): ByteArray
 
     fun signChallenge(challenge: ByteArray): ByteArray
+
+    /** Provider-specific MFi4 key provisioning and challenge exchange; never substitute AA03 signatures. */
+    fun mfi4Exchange(frame: com.shilapi.xcertplay.iap2.wire.Iap2Frame): com.shilapi.xcertplay.iap2.wire.Iap2Frame? =
+        throw MfiInvalidDataException("MFi4 exchange 0x${frame.messageId.toString(16)} requires a provider implementing MFi4 key management")
 
     fun baaCertificates(): BaaCertificatePair =
         throw MfiInvalidDataException("Authenticator does not provide BAA certificates")

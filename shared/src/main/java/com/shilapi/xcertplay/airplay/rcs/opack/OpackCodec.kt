@@ -103,7 +103,8 @@ object OpackCodec {
             return byteArrayOf((0x70 + value.size).toByte()) + value
         }
         val lengthBytes = dataLengthBytes(value.size)
-        return byteArrayOf((0x90 + lengthBytes.size).toByte()) +
+        val tag = when (lengthBytes.size) { 1 -> 0x91; 2 -> 0x92; 4 -> 0x93; 8 -> 0x94; else -> error("Invalid NSData length width") }
+        return byteArrayOf(tag.toByte()) +
             littleEndian(value.size.toLong(), lengthBytes.size) +
             value
     }
@@ -155,7 +156,8 @@ object OpackCodec {
             },
         )
 
-    private fun readValue(cursor: Cursor, objectTable: MutableList<Any?>): Any? {
+    private fun readValue(cursor: Cursor, objectTable: MutableList<Any?>, depth: Int = 0): Any? {
+        if (depth > 64) throw OpackException("OPACK nesting exceeds 64 levels")
         val tag = cursor.readU8()
         return when (tag) {
             0x01 -> true
@@ -206,8 +208,8 @@ object OpackCodec {
                 objectTable.getOrNull(index)
                     ?: throw OpackException("OPACK object reference $index is out of range")
             }
-            in 0xd0..0xdf -> readArray(cursor, tag and 0x0f, objectTable)
-            in 0xe0..0xef -> readDictionary(cursor, tag and 0x0f, objectTable)
+            in 0xd0..0xdf -> readArray(cursor, tag and 0x0f, objectTable, depth)
+            in 0xe0..0xef -> readDictionary(cursor, tag and 0x0f, objectTable, depth)
             else -> throw OpackException("Unknown OPACK tag 0x${tag.toString(16).padStart(2, '0')}")
         }
     }
@@ -216,6 +218,7 @@ object OpackCodec {
         cursor: Cursor,
         count: Int,
         objectTable: MutableList<Any?>,
+        depth: Int,
     ): List<Any?> {
         val values = ArrayList<Any?>(if (count == 0x0f) 16 else count)
         if (count == 0x0f) {
@@ -224,10 +227,10 @@ object OpackCodec {
                     cursor.readU8()
                     break
                 }
-                values += readValue(cursor, objectTable)
+                values += readValue(cursor, objectTable, depth + 1)
             }
         } else {
-            repeat(count) { values += readValue(cursor, objectTable) }
+            repeat(count) { values += readValue(cursor, objectTable, depth + 1) }
         }
         return values
     }
@@ -236,6 +239,7 @@ object OpackCodec {
         cursor: Cursor,
         count: Int,
         objectTable: MutableList<Any?>,
+        depth: Int,
     ): Map<Any?, Any?> {
         val values = LinkedHashMap<Any?, Any?>(if (count == 0x0f) 16 else count)
         if (count == 0x0f) {
@@ -244,14 +248,14 @@ object OpackCodec {
                     cursor.readU8()
                     break
                 }
-                val key = readValue(cursor, objectTable)
-                val value = readValue(cursor, objectTable)
+                val key = readValue(cursor, objectTable, depth + 1)
+                val value = readValue(cursor, objectTable, depth + 1)
                 values[key] = value
             }
         } else {
             repeat(count) {
-                val key = readValue(cursor, objectTable)
-                val value = readValue(cursor, objectTable)
+                val key = readValue(cursor, objectTable, depth + 1)
+                val value = readValue(cursor, objectTable, depth + 1)
                 values[key] = value
             }
         }

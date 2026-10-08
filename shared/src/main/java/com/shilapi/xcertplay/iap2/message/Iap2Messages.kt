@@ -46,6 +46,7 @@ data class Iap2ClusterAsset(
 ) {
     init {
         require(assetId.isNotBlank()) { "cluster asset ID must not be blank" }
+        require('\u0000' !in assetId) { "cluster asset ID must not contain U+0000" }
         require(assetVersion in 0..0xffff_ffffL) { "cluster asset version must fit in u32" }
     }
 }
@@ -257,7 +258,10 @@ data class Iap2WifiInformation(
 data class Iap2DeviceTransportIdentifier(
     val bluetoothMac: String?,
     val usbTransportIdentifier: String?,
-)
+) {
+    /** Audit §5: parameter 1 contains the iPhone UDID, retained legacy property for compatibility. */
+    val iphoneUdid: String? get() = usbTransportIdentifier
+}
 
 /** Typed codecs for power and subscription requests used during bring-up. */
 object Iap2ControlMessages {

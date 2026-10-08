@@ -85,6 +85,7 @@ object CafTypeCatalog {
         characteristic("MaxDefrostOn", 0x0000000031000029),
         characteristic("TargetTemperatureFahrenheit", 0x000000003100002A),
         characteristic("TemperatureMinMaxLabel", 0x0000000031000032),
+        characteristic("VehicleLayoutKey", 0x0000000036000065),
         characteristic("TemperatureUnit", 0x0000000046000005),
 
         control("NULL", 0x0000000000000000),

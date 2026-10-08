@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.iap2.session
 
 import java.io.ByteArrayOutputStream
+import com.shilapi.xcertplay.transfer.IncomingFileWriter
 
 internal data class Iap2TransferredArtwork(
     val fileTransferId: Int,
@@ -45,6 +46,8 @@ internal class Iap2FileTransferReceiver(
             if (!closed && !session.isClosed) {
                 onLog("iap2 file transfer stopped: ${failure.message ?: failure.javaClass.simpleName}")
             }
+        } finally {
+            handler.close()
         }
     }
 
@@ -79,15 +82,20 @@ internal data class Iap2FileTransferOutcome(
 /** Stateful protocol core kept independent from threads and Media3. */
 internal class Iap2FileTransferHandler(
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
-) {
+) : AutoCloseable {
     private data class Transfer(
-        val expectedBytes: Int,
         val startedMillis: Long,
         val data: ByteArrayOutputStream,
+        val writer: IncomingFileWriter,
         var receiving: Boolean = false,
     )
 
     private val transfers = HashMap<Int, Transfer>()
+
+    override fun close() {
+        transfers.values.forEach { it.writer.close() }
+        transfers.clear()
+    }
 
     fun handle(
         datagram: ByteArray,
@@ -105,7 +113,7 @@ internal class Iap2FileTransferHandler(
                 datagram.copyOfRange(2, datagram.size),
             )
             DATAGRAM_CANCEL -> {
-                transfers.remove(transferId)
+                transfers.remove(transferId)?.writer?.close()
                 Iap2FileTransferOutcome()
             }
             DATAGRAM_PAUSE -> Iap2FileTransferOutcome()
@@ -116,7 +124,7 @@ internal class Iap2FileTransferHandler(
     fun expire(): List<Int> {
         val now = nowMillis()
         val expired = transfers.filterValues { now - it.startedMillis >= TRANSFER_TIMEOUT_MILLIS }.keys
-        expired.forEach(transfers::remove)
+        expired.forEach { transfers.remove(it)?.writer?.close() }
         return expired.toList()
     }
 
@@ -125,7 +133,7 @@ internal class Iap2FileTransferHandler(
         datagram: ByteArray,
         isArtworkCached: (Int) -> Boolean,
     ): Iap2FileTransferOutcome {
-        transfers.remove(transferId)
+        transfers.remove(transferId)?.writer?.close()
         if (datagram.size < SETUP_BYTES) return failure(transferId)
         val size = readU64(datagram, 2)
         val fileType = readU16(datagram, 10)
@@ -135,10 +143,12 @@ internal class Iap2FileTransferHandler(
         if (isArtworkCached(transferId)) return response(transferId, DATAGRAM_SUCCESS)
 
         val expectedBytes = size.toInt()
+        val output = ByteArrayOutputStream(expectedBytes.coerceAtMost(INITIAL_CAPACITY_BYTES))
         transfers[transferId] = Transfer(
-            expectedBytes = expectedBytes,
             startedMillis = nowMillis(),
-            data = ByteArrayOutputStream(expectedBytes.coerceAtMost(INITIAL_CAPACITY_BYTES)),
+            data = output,
+            writer = IncomingFileWriter(output, MAX_ARTWORK_BYTES.toLong(),
+                expectedBytes.takeIf { it > 0 }?.toLong()),
         )
         return response(transferId, DATAGRAM_START)
     }
@@ -172,19 +182,15 @@ internal class Iap2FileTransferHandler(
         bytes: ByteArray,
         last: Boolean,
     ): Iap2FileTransferOutcome {
-        val receivedBytes = transfer.data.size() + bytes.size
-        if (receivedBytes > MAX_ARTWORK_BYTES ||
-            transfer.expectedBytes > 0 && receivedBytes > transfer.expectedBytes
-        ) {
+        try {
+            transfer.writer.write(bytes)
+            if (last) transfer.writer.finish()
+        } catch (_: IllegalArgumentException) {
             return failure(transferId)
         }
-        transfer.data.write(bytes)
         if (!last) return Iap2FileTransferOutcome()
-        if (transfer.expectedBytes > 0 && transfer.data.size() != transfer.expectedBytes) {
-            return failure(transferId)
-        }
 
-        transfers.remove(transferId)
+        transfers.remove(transferId)?.writer?.close()
         return Iap2FileTransferOutcome(
             response = command(transferId, DATAGRAM_SUCCESS),
             artwork = Iap2TransferredArtwork(transferId, transfer.data.toByteArray()),
@@ -192,7 +198,7 @@ internal class Iap2FileTransferHandler(
     }
 
     private fun failure(transferId: Int): Iap2FileTransferOutcome {
-        transfers.remove(transferId)
+        transfers.remove(transferId)?.writer?.close()
         return response(transferId, DATAGRAM_FAILURE)
     }
 

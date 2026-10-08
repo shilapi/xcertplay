@@ -9,9 +9,13 @@ package com.shilapi.xcertplay.airplay
 object ProtocolTraceFormatter {
     fun hex(bytes: ByteArray): String {
         if (bytes.isEmpty()) return "<empty>"
-        return buildString(bytes.size * 2) {
-            bytes.forEach { byte -> append("%02x".format(byte.toInt() and 0xff)) }
+        val digits = "0123456789abcdef"
+        val output = CharArray(bytes.size * 2)
+        bytes.forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            output[index * 2] = digits[value ushr 4]; output[index * 2 + 1] = digits[value and 15]
         }
+        return String(output)
     }
 
     fun preview(bytes: ByteArray, maximumBytes: Int = 32): String {

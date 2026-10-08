@@ -15,6 +15,7 @@ interface MediaSink {
     fun onVideoRecoveryHandler(type: Int, requestKeyFrame: (() -> Boolean)?) {}
     fun onVideoConfig(type: Int, codecData: ByteArray) {}
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
+    fun onVideoFrame(type: Int, naluBytes: ByteArray, presentationTimeUs: Long?) = onVideoFrame(type, naluBytes)
     fun onScreenStreamActive(type: Int, active: Boolean) {}
     fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {}
     fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {}
@@ -78,7 +79,7 @@ class CarPlayMediaEngine(
         val key = outputKey(session, stream) ?: return null
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
-        val screen = ScreenStream(key)
+        val screen = ScreenStream(key) { session.logTrace("screen=$type $it") }
         // The no-display-UUID forceKeyFrame command targets the primary screen.
         // Do not accidentally restart the main screen when the alternate decoder loses sync.
         if (type == STREAM_TYPE_MAIN_SCREEN) {
@@ -90,7 +91,8 @@ class CarPlayMediaEngine(
             object : ScreenStream.Listener {
                 override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
                 override fun onConfig(codecData: ByteArray) = sink.onVideoConfig(type, codecData)
-                override fun onFrame(naluBytes: ByteArray) = sink.onVideoFrame(type, naluBytes)
+                override fun onFrame(naluBytes: ByteArray, presentationTimeUs: Long?) =
+                    sink.onVideoFrame(type, naluBytes, presentationTimeUs)
                 override fun onClosed(cause: Throwable?) {
                     Log.w(
                         TAG,
@@ -138,7 +140,7 @@ class CarPlayMediaEngine(
 
         val capture = audioCaptureDirectory?.let { AudioPacketCapture(it, type) }
         if (capture != null) audioCaptures[type] = capture
-        val audio = AudioStream(key, type)
+        val audio = AudioStream(key, type, session::logTrace)
         val (dataPort, controlPort) = audio.listen(
             object : AudioStream.Listener {
                 override fun onStarted(firstSample: Int) {
@@ -204,7 +206,7 @@ class CarPlayMediaEngine(
         addPendingDataStream(session, PendingDataStream(opened.closeable, opened.attach))
         return linkedMapOf<String, Any?>(
             "type" to STREAM_TYPE_DATA,
-            "streamID" to 1L,
+            "streamID" to (stream["streamID"] ?: (RcsClientTypes.ALL.indexOf(clientType) + 1).toLong()),
             "dataPort" to opened.port,
         )
             .apply {
@@ -367,6 +369,7 @@ class CarPlayMediaEngine(
             key = key,
             codec = format.codec,
             bitrate = if (format.codec == AudioCodecKind.OPUS) opusBitrate else null,
+            onTrace = session::logTrace,
         )
     }
 

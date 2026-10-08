@@ -7,6 +7,7 @@ enum class RcsPayloadStyle {
     CAF_BINARY_PLIST_OPACK,
     UI_SYNC_PLIST,
     RAW_IAP2,
+    FILE_TRANSFER_OPACK,
 
     /** UUID and carrier are known, but the application-level schema is not confirmed. */
     UNCONFIRMED_OPAQUE,
@@ -59,7 +60,7 @@ object RcsClientTypes {
         uuid = UUID.fromString("09A8AA2D-8932-4048-9492-6B658D42C2A3"),
         feature = AirPlayFeature.FILE_TRANSFER,
         withoutReply = false,
-        payloadStyle = RcsPayloadStyle.UNCONFIRMED_OPAQUE,
+        payloadStyle = RcsPayloadStyle.FILE_TRANSFER_OPACK,
     )
     val CAR_PLAY_LOGGING_DATA = RcsClientType(
         name = "CarPlayLoggingData",

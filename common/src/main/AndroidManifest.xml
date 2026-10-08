@@ -2,8 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.car.permission.CAR_SPEED" />
+    <uses-permission android:name="android.car.permission.CAR_ENGINE_DETAILED" />
 
     <application>
+        <uses-library android:name="android.car" android:required="false" />
 
         <activity
             android:name="com.shilapi.xcertplay.CarPlayHostActivity"

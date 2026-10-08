@@ -84,6 +84,7 @@ class RcsDataStream private constructor(
             writeKey = writeKey,
             bindAddress = bindAddress,
             onTrace = ::trace,
+            tracePayloads = clientType != com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes.CAR_PLAY_UPDATE_DATA,
         )
         listeners += primary
 
@@ -99,6 +100,7 @@ class RcsDataStream private constructor(
                 bindAddress = secondaryAddress,
                 port = primary.port,
                 onTrace = ::trace,
+                tracePayloads = clientType != com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes.CAR_PLAY_UPDATE_DATA,
             )
         }.onSuccess { listeners += it }
             .onFailure {
@@ -131,7 +133,7 @@ class RcsDataStream private constructor(
             while (pending.isNotEmpty()) {
                 val message = pending.pollFirst() ?: break
                 pendingBytes -= message.body.size
-                callbacks += { handler.onMessage(this, message) }
+                callbacks += { invokeMessage(handler, message) }
             }
             synchronized(callbackLock) {
                 callbacks.forEach { it() }
@@ -189,7 +191,9 @@ class RcsDataStream private constructor(
             while (!closed.get()) {
                 val message = acceptedChannel.receiveNext(RECEIVE_POLL_MILLIS)
                 if (message != null) {
-                    dispatch(message)
+                    if (message.packageType == com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.PACKAGE_TYPE_REPLY) {
+                        trace("RCS transport reply received without pending synchronous request")
+                    } else dispatch(message)
                     continue
                 }
                 if (acceptedChannel.isPeerEnded || acceptedChannel.isClosed) break
@@ -238,7 +242,7 @@ class RcsDataStream private constructor(
         }
         var failure: Throwable? = null
         synchronized(callbackLock) {
-            runCatching { callback?.onMessage(this, message) }
+            runCatching { callback?.let { invokeMessage(it, message) } }
                 .onFailure {
                     failure = it
                     trace("RCS message callback failed: $it")
@@ -246,6 +250,19 @@ class RcsDataStream private constructor(
         }
         if (failure != null) {
             close()
+        }
+    }
+
+    private fun invokeMessage(target: RcsDataStreamHandler, message: RcsMessage) {
+        val sync = message.packageType == com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.PACKAGE_TYPE_SYNC
+        try {
+            target.onMessage(this, message)
+            // APTransport invokes the business handler before sending rply. An empty transport
+            // reply acknowledges delivery; the theme accepted message still gates verified load.
+            if (sync) send(message.transportReply())
+        } catch (failure: Throwable) {
+            if (sync) runCatching { send(message.transportReply(status = -1)) }
+            throw failure
         }
     }
 

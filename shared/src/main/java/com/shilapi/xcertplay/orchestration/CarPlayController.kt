@@ -968,9 +968,13 @@ class CarPlayController(
                 closeWirelessStack()
                 return
             }
-            val identification = config.identification.copy(
+            val identification = com.shilapi.xcertplay.airplay.CarPlayUltraIdentification.configure(
+                config.identification, wirelessAirPlayConfig).copy(
                 wireless = Iap2WirelessIdentification(hostBluetoothMac, hotspotInfo.ssid),
             )
+            debugLog("Ultra identification supportsThemeAssets=${identification.supportsThemeAssets} " +
+                "assetIdentity=${if (identification.themeAssetIdentifier == null) "unconfigured" else "configured"} " +
+                "assetVersion=${wirelessAirPlayConfig.ultra?.clusterAsset?.assetVersion ?: "none"}")
             val endpoint = Iap2WirelessCarPlayEndpoint(
                 ssid = hotspotInfo.ssid,
                 passphrase = hotspotInfo.passphrase,
@@ -981,6 +985,8 @@ class CarPlayController(
                 deviceIdentifier = deviceIdentifier,
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
+                sdkVersion = airPlayConfig.ultra?.sdkVersion,
+                clusterAsset = airPlayConfig.ultra?.clusterAsset,
             )
             wirelessIdentification = identification
             wirelessAirPlayEndpoint = endpoint
@@ -1086,7 +1092,7 @@ class CarPlayController(
                         },
                         onStopped = { deactivateMediaRemote(channel) },
                         onIncoming = ::onIap2Incoming,
-                        onProgress = { message -> debugLog("iAP tunnel $message") },
+                        onProgress = { message -> debugLog(if (message.startsWith("TRACE ")) "TRACE iAP tunnel ${message.removePrefix("TRACE ")}" else "iAP tunnel $message") },
                     )
                     if (closed || generation != wirelessGeneration.get()) return@execute
                     when (result.terminal) {
@@ -1458,6 +1464,8 @@ class CarPlayController(
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
                 deviceIdentifier = ncmHostMac.macString(),
+                sdkVersion = airPlayConfig.ultra?.sdkVersion,
+                clusterAsset = airPlayConfig.ultra?.clusterAsset,
             )
             onStatus(CarPlayStatus.RunningControl)
             debugLog("wired iAP2 control starting")
@@ -1470,7 +1478,7 @@ class CarPlayController(
                 onReady = { activateMediaRemote(csm) },
                 onStopped = { deactivateMediaRemote(csm) },
                 onIncoming = ::onIap2Incoming,
-                onProgress = { message -> debugLog("wired $message") },
+                onProgress = { message -> debugLog(if (message.startsWith("TRACE ")) "TRACE wired ${message.removePrefix("TRACE ")}" else "wired $message") },
             )
             onStatus(
                 when (result.terminal) {
@@ -1903,7 +1911,7 @@ class CarPlayController(
     }
 
     private fun debugLog(message: String) {
-        Log.i(IphoneCarPlayConfiguration.TAG, message)
+        com.shilapi.xcertplay.airplay.ProtocolLog.info(IphoneCarPlayConfiguration.TAG, message)
         try {
             uiListener?.onDebugLog(message)
         } catch (error: Exception) {
@@ -1912,11 +1920,10 @@ class CarPlayController(
     }
 
     private fun debugLog(message: String, error: Throwable) {
-        Log.w(IphoneCarPlayConfiguration.TAG, message, error)
+        val record = "$message\n${Log.getStackTraceString(error)}"
+        com.shilapi.xcertplay.airplay.ProtocolLog.info(IphoneCarPlayConfiguration.TAG, record)
         try {
-            uiListener?.onDebugLog(
-                "$message: ${error.message ?: error.javaClass.simpleName}",
-            )
+            uiListener?.onDebugLog(record)
         } catch (callbackError: Exception) {
             Log.w(IphoneCarPlayConfiguration.TAG, "debug log callback failed", callbackError)
         }
@@ -1927,7 +1934,7 @@ class CarPlayController(
         mainHandler.post {
             if (!closed && status != lastReportedStatus) {
                 lastReportedStatus = status
-                uiListener?.onDebugLog(status.debugLogMessage())
+                debugLog(status.debugLogMessage())
                 uiStatusReporter?.invoke(status)
             }
         }

@@ -143,6 +143,17 @@ sealed interface CafFormatValue {
     }
 }
 
+fun CafFormatValue.toWireValue(): Any = when (this) {
+    is CafFormatValue.Bool -> value
+    is CafFormatValue.Unsigned -> if (value.bitLength() <= 63) value.toLong() else value
+    is CafFormatValue.Signed -> value.toLong()
+    is CafFormatValue.Floating -> value
+    is CafFormatValue.Text -> value
+    is CafFormatValue.Binary -> value.copyOf()
+    is CafFormatValue.Dictionary -> value
+    is CafFormatValue.ArrayValue -> value
+}
+
 data class CafControlParameterMetadata(
     val name: String,
     val format: CafCharacteristicFormat,
@@ -294,7 +305,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
             }
         return CafAccessoryMetadata(
             type = map.requiredType("type", label),
-            iid = map.requiredIid("iid", label),
+            iid = map.instanceIdentifier(label),
             version = map.requiredString("version", label),
             services = services,
             extensions = map.unknownFields(ACCESSORY_KEYS),
@@ -313,7 +324,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
             }
         return CafServiceMetadata(
             type = map.requiredType("type", label),
-            iid = map.requiredIid("iid", label),
+            iid = map.instanceIdentifier(label),
             characteristics = characteristics,
             controls = controls,
             multipleInstances = map.optionalBoolean("multipleInstances"),
@@ -337,7 +348,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
             }
         return CafCharacteristicMetadata(
             type = map.requiredType("type", label),
-            iid = map.requiredIid("iid", label),
+            iid = map.instanceIdentifier(label),
             format = format,
             writable = map.optionalBoolean("writable"),
             mutable = map.optionalBoolean("mutable"),
@@ -350,12 +361,12 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
             iidNotifier = map.optionalIid("iidNotifier"),
             iidRestricted = map.optionalIid("iidRestricted"),
             iidHidden = map.optionalIid("iidHidden"),
-            minimumValue = map.optionalFormatValue("minimumValue", format, label),
-            maximumValue = map.optionalFormatValue("maximumValue", format, label),
+            minimumValue = map.constraintValue("minimumValue", format, label),
+            maximumValue = map.constraintValue("maximumValue", format, label),
             maximumLength = map.optionalLong("maximumLength", label)?.toIntExact(
                 "$label.maximumLength",
             ),
-            stepValue = map.optionalFormatValue("stepValue", format, label),
+            stepValue = map.constraintValue("stepValue", format, label),
             validValues = validValues,
             units = map["units"],
             oemWritable = map.optionalBoolean("oemWritable"),
@@ -367,7 +378,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
         val map = requireStringMap(raw, label)
         return CafControlMetadata(
             type = map.requiredType("type", label),
-            iid = map.requiredIid("iid", label),
+            iid = map.instanceIdentifier(label),
             sender = CafControlSender.fromWireName(map.requiredString("sender", label)),
             hasResponse = map.requiredBoolean("hasResponse", label),
             priority = map.optionalLong("priority", label),
@@ -406,6 +417,15 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
         )
     }
 
+    // iOS 27: _kCarDataConfigurationIIDKey is "iid" at every config-tree level.
+    // Objective-C instanceID property/log names are not a wire-key alias.
+    private fun Map<String, Any?>.instanceIdentifier(label: String): CafIid {
+        if (containsKey("instanceID")) {
+            throw CafProtocolException("$label must use numeric 'iid', not 'instanceID'")
+        }
+        return requiredIid("iid", label)
+    }
+
     private fun Map<String, Any?>.requiredType(key: String, label: String): CafTypeId =
         CafTypeId(requiredLong(key, label))
 
@@ -414,6 +434,19 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
 
     private fun Map<String, Any?>.optionalIid(key: String): CafIid? =
         optionalLong(key, key)?.let(::CafIid)
+
+    // CAFCharacteristicMetadata requires number constraints for formats 1..9,
+    // independently of writable/mutable/initialValue.
+    private fun Map<String, Any?>.constraintValue(
+        key: String,
+        format: CafCharacteristicFormat,
+        label: String,
+    ): CafFormatValue? {
+        if (format.wireValue in 1L..9L && this[key] == null) {
+            throw CafProtocolException("$label.$key is required for numeric format ${format.wireValue}")
+        }
+        return optionalFormatValue(key, format, label)
+    }
 
     private fun Map<String, Any?>.optionalFormatValue(
         key: String,
@@ -480,10 +513,11 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
 
     private val ACCESSORY_TREE_KEYS = setOf("accessories")
 
-    private val ACCESSORY_KEYS = setOf("type", "iid", "version", "services")
+    private val ACCESSORY_KEYS = setOf("type", "instanceID", "iid", "version", "services")
 
     private val SERVICE_KEYS = setOf(
         "type",
+        "instanceID",
         "iid",
         "characteristics",
         "controls",
@@ -494,6 +528,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
 
     private val CHARACTERISTIC_KEYS = setOf(
         "type",
+        "instanceID",
         "iid",
         "format",
         "writable",
@@ -518,6 +553,7 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
 
     private val CONTROL_KEYS = setOf(
         "type",
+        "instanceID",
         "iid",
         "sender",
         "hasResponse",

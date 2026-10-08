@@ -4,7 +4,7 @@ package com.shilapi.xcertplay.airplay
  * Minimal Apple binary property list (bplist00) codec for the CarPlay control channel.
  *
  * It covers the subset the stack emits and reads: dictionaries, arrays, ASCII and UTF-16
- * strings, raw data, non-negative integers, 32/64-bit reals, and booleans. Dictionary keys are
+ * strings, raw data, signed integers, 32/64-bit reals, booleans, and null values. Dictionary keys are
  * serialized in insertion order, matching the reference implementation this stack targets.
  * Supported scalar keys retain their type; unsupported key objects keep the legacy string fallback.
  */
@@ -36,6 +36,7 @@ object BplistCodec {
             val index = nodes.size
             nodes.add(Leaf(ByteArray(0)))
             when (value) {
+                null -> nodes[index] = Leaf(byteArrayOf(0x00))
                 is Boolean -> nodes[index] = Leaf(byteArrayOf(if (value) 0x09 else 0x08))
                 is java.math.BigInteger -> {
                     require(value.signum() >= 0) { "bplist: negative integers are not supported" }
@@ -47,7 +48,7 @@ object BplistCodec {
                     nodes[index] = if (number >= 0) {
                         Leaf(encodeInt(number))
                     } else {
-                        Leaf(byteArrayOf(0x23) + bigEndian(number.toDouble().toRawBits(), 8))
+                        Leaf(byteArrayOf(0x13) + bigEndian(number, 8))
                     }
                 }
                 is Float, is Double -> {
@@ -129,6 +130,7 @@ object BplistCodec {
 
         return when (type) {
             0x0 -> when (nibble) {
+                0x00 -> null
                 0x08 -> false
                 0x09 -> true
                 else -> throw IllegalArgumentException("bplist: unsupported primitive 0x0$nibble")
@@ -235,8 +237,7 @@ object BplistCodec {
             2 -> 1
             else -> 0
         }
-        val raw = number.toByteArray()
-        return byteArrayOf((0x10 or log).toByte()) + raw.copyOfRange(raw.size - size, raw.size)
+        return byteArrayOf((0x10 or log).toByte()) + bigEndian(number.toLong(), size)
     }
 
     private fun marker(type: Int, count: Int): ByteArray {

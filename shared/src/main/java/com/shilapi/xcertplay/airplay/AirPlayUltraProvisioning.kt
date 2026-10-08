@@ -22,6 +22,9 @@ data class AirPlayUltraProvisioning(
     val sidecars: Map<AirPlayFeature, Any?> = emptyMap(),
     val rcsFactories: Map<RcsClientType, RcsDataStreamHandlerFactory> = emptyMap(),
     val runtimeFeatures: Set<AirPlayFeature> = emptySet(),
+    val sdkVersion: String = "1.0",
+    val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
+    val clusterDisplayPluginId: String? = null,
 ) {
     init {
         sidecars.keys.forEach { feature ->
@@ -92,6 +95,9 @@ data class AirPlayUltraProvisioning(
             sessionManagementInfo = sidecars.wireMap(AirPlayFeature.SESSION_MANAGEMENT),
             readyFeatures = readyFeatures,
             runtime = runtime,
+            sdkVersion = sdkVersion,
+            clusterAsset = clusterAsset,
+            clusterDisplayPluginId = clusterDisplayPluginId,
         )
     }
 

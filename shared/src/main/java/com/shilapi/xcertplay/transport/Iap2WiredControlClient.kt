@@ -32,6 +32,7 @@ class Iap2WiredControlClient(
         onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
+        Iap2CarPlayThemeContract.validateIdentification(identification, endpoint.sdkVersion, endpoint.clusterAsset)
         require(availableCurrentMilliAmps in 0..0xffff) {
             "availableCurrentMilliAmps must be in 0..65535"
         }
@@ -40,9 +41,13 @@ class Iap2WiredControlClient(
         }
 
         val bringUpDeadlineNanos = deadlineAfter(bringUpTimeoutMillis)
+        require(!identification.locationInformationEnabled || locationProvider != null) {
+            "LocationInformation cannot be declared without a location provider"
+        }
         Iap2IdentificationClient(session).identify(
-            identification,
+            mfi.identification(identification),
             requireRemaining(bringUpDeadlineNanos),
+            onTrace = onProgress,
         )
         onProgress("iap2 identification accepted")
         var stage = Iap2WiredControlStage.IDENTIFIED
@@ -57,6 +62,10 @@ class Iap2WiredControlClient(
         stage = Iap2WiredControlStage.SUBSCRIBED
         onProgress("iap2 power/subscriptions sent")
 
+        val ultraRelay = com.shilapi.xcertplay.iap2.message.Iap2UltraRelaySession(
+            respond = { mfi.validateUltraReply(it); session.send(it, CONTROL_SEND_TIMEOUT_MILLIS) },
+            authenticate = { mfi.handleUltra(it, onProgress) }, trace = { onProgress("TRACE $it") },
+            accessoryInformation = mapOf(0 to identification.name, 1 to identification.modelIdentifier, 2 to identification.manufacturer))
         var forwardedFrames = 0
         var carPlayStartSessions = 0
         var locationActive = false
@@ -97,6 +106,10 @@ class Iap2WiredControlClient(
                     continue
                 }
 
+                if (mfi.supportsUltra(incoming.messageId)) {
+                    mfi.validateUltraIncoming(incoming)
+                    if (ultraRelay.handle(incoming)) continue
+                }
                 when (incoming.messageId) {
                     CARPLAY_AVAILABILITY -> {
                         onProgress("iap2 rx=0x4300 carplay-availability")
@@ -110,6 +123,11 @@ class Iap2WiredControlClient(
                     }
 
                     Iap2LocationMessages.START_LOCATION_INFORMATION -> {
+                        if (!identification.locationInformationEnabled) {
+                            onProgress("iap2 0xfffa ignored: LocationInformation was not declared")
+                            continue
+                        }
+                        if (locationActive) { onProgress("iap2 duplicate location start ignored"); continue }
                         onProgress("iap2 rx=0xfffa start-location-information")
                         locationActive = startLocationUpdates(locationProvider, onProgress)
                         locationSentLogged = false
@@ -121,9 +139,9 @@ class Iap2WiredControlClient(
 
                     Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
                         onProgress("iap2 rx=0xfffc stop-location-information")
+                        if (locationActive) locationProvider?.stop()
                         locationActive = false
                         locationSentLogged = false
-                        locationProvider?.stop()
                     }
 
                     else -> {
@@ -134,7 +152,7 @@ class Iap2WiredControlClient(
                 }
             }
         } finally {
-            locationProvider?.stop()
+            if (locationActive) locationProvider?.stop()
             if (hidStarted && !session.isClosed) {
                 runCatching {
                     session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
@@ -205,6 +223,8 @@ class Iap2WiredControlClient(
                 deviceIdentifier = endpoint.deviceIdentifier,
                 publicKey = endpoint.publicKey,
                 sourceVersion = endpoint.sourceVersion,
+                sdkVersion = endpoint.sdkVersion,
+                clusterAsset = endpoint.clusterAsset,
             )
 
         fun carPlayAvailabilitySummary(payload: ByteArray): String {
@@ -245,11 +265,14 @@ class Iap2WiredCarPlayEndpoint(
     val publicKey: String,
     val sourceVersion: String,
     val deviceIdentifier: String? = null,
+    val sdkVersion: String? = null,
+    val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
 ) {
     /** A stable copy so a caller cannot mutate a validated endpoint before it is encoded. */
     val ipv6Addresses: List<String> = ipv6Addresses.toList()
 
     init {
+        Iap2CarPlayThemeContract.validateAssetInformation(sdkVersion, clusterAsset)
         require(ipv6Addresses.isNotEmpty()) { "At least one wired IPv6 address is required" }
         require(ipv6Addresses.all(::isIpv6Literal)) { "Every wired address must be an IPv6 text literal" }
         require(airPlayPort in 1..65535) { "airPlayPort must be in 1..65535" }

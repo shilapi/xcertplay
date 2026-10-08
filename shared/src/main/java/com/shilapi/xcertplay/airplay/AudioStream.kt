@@ -29,6 +29,7 @@ data class AudioFormat(
 class AudioStream(
     private val key: ByteArray,
     private val streamType: Int = -1,
+    private val onTrace: (String) -> Unit = {},
 ) : Closeable {
     interface Listener {
         fun onStarted(firstSample: Int) {}
@@ -85,6 +86,7 @@ class AudioStream(
                 if (closed.get()) return else continue
             }
             val wire = packet.data.copyOf(packet.length)
+            onTrace("AUDIO RX type=$streamType peer=${packet.address}:${packet.port} wireHex=${ProtocolTraceFormatter.hex(wire)}")
             val packetNumber = receivedPackets.incrementAndGet()
             if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {
                 if (packetNumber == 1) {
@@ -121,10 +123,12 @@ class AudioStream(
                         error,
                     )
                 }
+                onTrace("AUDIO decrypt failed type=$streamType sample=$sample reason=${error.stackTraceToString()}")
                 listener.onPacket(wire, null, sample, error)
                 continue
             }
             val rtp = wire.copyOf(RTP_HEADER_LEN) + payload
+            onTrace("AUDIO decrypted type=$streamType sample=$sample rtpHex=${ProtocolTraceFormatter.hex(rtp)}")
             val decryptedNumber = decryptedPackets.incrementAndGet()
             if (decryptedNumber <= FIRST_PACKET_LOG_COUNT) {
                 android.util.Log.i(
@@ -153,7 +157,9 @@ class AudioStream(
         val buffer = ByteArray(DATAGRAM_BYTES)
         while (!closed.get()) {
             try {
-                socket.receive(DatagramPacket(buffer, buffer.size))
+                val packet = DatagramPacket(buffer, buffer.size)
+                socket.receive(packet)
+                onTrace("RTCP RX type=$streamType peer=${packet.address}:${packet.port} wireHex=${ProtocolTraceFormatter.hex(packet.data.copyOf(packet.length))}")
             } catch (_: Exception) {
                 if (closed.get()) return
             }

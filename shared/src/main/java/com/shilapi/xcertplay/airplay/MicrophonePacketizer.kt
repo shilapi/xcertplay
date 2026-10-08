@@ -15,6 +15,7 @@ data class MicrophoneConfig(
     val key: ByteArray,
     val codec: AudioCodecKind = AudioCodecKind.LPCM,
     val bitrate: Int? = null,
+    val onTrace: (String) -> Unit = {},
 ) {
     val samplesPerPacket: Int
         get() = maxOf(1, sampleRate * frameMillis / 1000)

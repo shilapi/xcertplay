@@ -17,6 +17,7 @@ import java.net.InetAddress
 class IapTunnel(
     readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
+    onTrace: (String) -> Unit = {},
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -30,6 +31,7 @@ class IapTunnel(
         readKey = readKey,
         writeKey = readKey,
         bindAddress = bindAddress,
+        onTrace = onTrace,
     )
 
     fun listen(listener: Listener): Int =

@@ -8,11 +8,11 @@ class CarPlayUiSyncProtocolException(
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
 
-enum class CarPlayUiSyncMessageType(val wireName: String) {
-    RESET("reset"),
-    RESET_COMPLETE("resetComplete"),
-    COMMAND("command"),
-    COMMAND_ACK("commandAck"),
+enum class CarPlayUiSyncMessageType(val wireName: String, val wireValue: Long) {
+    RESET("reset", 0),
+    RESET_COMPLETE("resetComplete", 1),
+    COMMAND("command", 2),
+    COMMAND_ACK("commandAck", 3),
     ;
 
     companion object {
@@ -24,10 +24,10 @@ enum class CarPlayUiSyncMessageType(val wireName: String) {
     }
 }
 
-enum class CarPlayUiSyncProtocolVersion(val wireName: String) {
-    V1("v1"),
-    V2("v2"),
-    V3("v3"),
+enum class CarPlayUiSyncProtocolVersion(val wireName: String, val wireValue: Long) {
+    V1("v1", 1),
+    V2("v2", 2),
+    V3("v3", 3),
     ;
 
     companion object {
@@ -71,6 +71,19 @@ enum class CarPlayUiSyncCommand(val wireName: String) {
     ;
 
     companion object {
+        // LayoutController.lua in the signed 44C9FA31EC/985 asset. Values are hexadecimal.
+        private val assetTypes = mapOf(
+            0x01L to TRANSITION_START, 0x02L to TRANSITION_DATA, 0x03L to LAYOUT_CHANGE,
+            0x04L to TRANSITION_END, 0x05L to REQUEST_LAYOUT, 0x06L to END_LAYOUT_CHANGE,
+            0x07L to GIVE_FOCUS, 0x08L to REQUEST_FOCUS, 0x09L to METADATA_TRANSFER,
+            0x10L to PALETTE_CHANGE, 0x11L to ALLOW_TRANSITIONS,
+            0x12L to TARGET_APPEARANCE_CHANGE, 0x13L to APPEARANCE_PREFERENCE_CHANGE,
+            0x14L to DRIVE_MODE_CHANGE,
+        )
+        fun fromAssetType(value: Long): CarPlayUiSyncCommand = assetTypes[value]
+            ?: throw CarPlayUiSyncProtocolException("Unknown OEM UI command type $value")
+        fun assetType(command: CarPlayUiSyncCommand): Long = assetTypes.entries.firstOrNull { it.value == command }?.key
+            ?: throw CarPlayUiSyncProtocolException("Command has no confirmed OEM wire type: $command")
         fun fromWireName(value: String): CarPlayUiSyncCommand =
             entries.firstOrNull { it.wireName == value }
                 ?: throw CarPlayUiSyncProtocolException(
@@ -80,14 +93,15 @@ enum class CarPlayUiSyncCommand(val wireName: String) {
 }
 
 /**
- * Typed `payload` dictionary for [CarPlayUiSyncMessageType.COMMAND].
+ * Typed command dictionary, encoded as nested binary plist in the envelope's `data` field.
  *
- * The command name is always emitted. Firmware-confirmed required fields are checked when this
- * type is constructed; callers can preserve additional OEM fields through [fields].
+ * OEM payloads use numeric type/data from LayoutController.lua. The string command encoding
+ * remains available for the local reference backend; it is not the OEM wire format.
  */
 data class CarPlayUiSyncCommandPayload(
     val command: CarPlayUiSyncCommand,
     val fields: Map<String, Any?> = emptyMap(),
+    val assetWire: Boolean = false,
 ) {
     init {
         if (fields.containsKey("command")) {
@@ -95,10 +109,13 @@ data class CarPlayUiSyncCommandPayload(
                 "UI Sync command payload must not contain a nested 'command' key",
             )
         }
-        validatePayload(command, fields)
+        if (!assetWire) validatePayload(command, fields)
+        else CarPlayUiSyncCommand.assetType(command)
     }
 
-    fun toWireMap(): Map<String, Any?> = linkedMapOf<String, Any?>(
+    fun toWireMap(): Map<String, Any?> = if (assetWire) linkedMapOf(
+        "type" to CarPlayUiSyncCommand.assetType(command), "data" to fields,
+    ) else linkedMapOf<String, Any?>(
         "command" to command.wireName,
     ).apply {
         putAll(fields)
@@ -106,6 +123,20 @@ data class CarPlayUiSyncCommandPayload(
 
     companion object {
         fun fromWireMap(values: Map<String, Any?>): CarPlayUiSyncCommandPayload {
+            if (values.containsKey("type")) {
+                require(!values.containsKey("command")) { "Conflicting OEM UI command/type" }
+                val type = when (val raw = values["type"]) {
+                    is Long -> raw
+                    is Int -> raw.toLong()
+                    else -> throw CarPlayUiSyncProtocolException("OEM command type must be an integer")
+                }
+                val rawData = values["data"] as? Map<*, *>
+                    ?: throw CarPlayUiSyncProtocolException("OEM command data must be a dictionary")
+                require(rawData.keys.all { it is String }) { "OEM command data keys must be strings" }
+                @Suppress("UNCHECKED_CAST")
+                return CarPlayUiSyncCommandPayload(CarPlayUiSyncCommand.fromAssetType(type),
+                    LinkedHashMap(rawData as Map<String, Any?>), assetWire = true)
+            }
             val command = values["command"] as? String
                 ?: throw CarPlayUiSyncProtocolException(
                     "UI Sync command payload requires a string 'command'",
@@ -119,7 +150,9 @@ data class CarPlayUiSyncCommandPayload(
 }
 
 /**
- * `DashBoard.DBUISyncSessionMessage` envelope carried over `CarPlayClusterControl`.
+ * Accessory wire envelope carried over `CarPlayClusterControl`.
+ * Numeric type/version and nested binary-plist data follow the acquired production asset's
+ * APL/ClusterControlSession.lua. Swift/log enum names are not the serialized wire values.
  *
  * Optional Swift properties are omitted from [toWireMap] when null. The sequence fields are kept
  * as signed 64-bit values so binary-plist integers round-trip without narrowing.
@@ -133,6 +166,7 @@ data class CarPlayUiSyncMessage(
     val noAck: Boolean = false,
     val vehicleId: String? = null,
     val version: CarPlayUiSyncProtocolVersion? = null,
+    val remoteIdentifier: String? = null,
 ) {
     init {
         requireSequence("ssn", sessionSequenceNumber)
@@ -141,15 +175,16 @@ data class CarPlayUiSyncMessage(
     }
 
     fun toWireMap(): Map<String, Any?> = linkedMapOf<String, Any?>(
-        "type" to type.wireName,
+        "type" to type.wireValue,
         "ssn" to sessionSequenceNumber,
         "psn" to packetSequenceNumber,
         "asn" to acknowledgementSequenceNumber,
     ).apply {
-        payload?.let { put("payload", LinkedHashMap(it)) }
+        payload?.let { put("data", BplistCodec.encode(it)) }
         put("noAck", noAck)
         vehicleId?.let { put("vehicleID", it) }
-        version?.let { put("version", it.wireName) }
+        version?.let { put("version", it.wireValue) }
+        remoteIdentifier?.let { put("id", it) }
     }
 
     fun toBplist(): ByteArray = BplistCodec.encode(toWireMap())
@@ -281,18 +316,27 @@ object CarPlayUiSyncMessageFactory {
 
         val type = when (val value = typed["type"]) {
             is String -> CarPlayUiSyncMessageType.fromWireName(value)
+            is Byte, is Short, is Int, is Long -> CarPlayUiSyncMessageType.entries
+                .firstOrNull { it.wireValue == (value as Number).toLong() }
+                ?: throw CarPlayUiSyncProtocolException("Unknown numeric UI Sync type")
             else -> throw CarPlayUiSyncProtocolException(
-                "UI Sync message 'type' must be a string",
+                "UI Sync message 'type' must be an integer",
             )
         }
-        val payload = when (val value = typed["payload"]) {
+        require(!(typed.containsKey("data") && typed.containsKey("payload"))) { "Conflicting UI Sync data/payload" }
+        val numericWire = typed["type"] !is String
+        val rawPayload = if (numericWire) typed["data"]?.let {
+            val bytes = it as? ByteArray ?: throw CarPlayUiSyncProtocolException("UI Sync data must be NSData")
+            BplistCodec.decode(bytes)
+        } else typed["payload"]
+        val payload = when (val value = rawPayload) {
             null -> null
             is Map<*, *> -> stringMap(value, "payload")
             else -> throw CarPlayUiSyncProtocolException(
                 "UI Sync message 'payload' must be a dictionary",
             )
         }
-        val noAck = typed["noAck"] as? Boolean
+        val noAck = if (numericWire && !typed.containsKey("noAck")) false else typed["noAck"] as? Boolean
             ?: throw CarPlayUiSyncProtocolException(
                 "UI Sync message 'noAck' must be a boolean",
             )
@@ -303,11 +347,19 @@ object CarPlayUiSyncMessageFactory {
                 )
         }
         val version = typed["version"]?.let { value ->
-            val wireName = value as? String
-                ?: throw CarPlayUiSyncProtocolException(
-                    "UI Sync message 'version' must be a string",
-                )
-            CarPlayUiSyncProtocolVersion.fromWireName(wireName)
+            when (value) {
+                is String -> CarPlayUiSyncProtocolVersion.fromWireName(value)
+                is Byte, is Short, is Int, is Long -> when ((value as Number).toLong()) {
+                    1L -> CarPlayUiSyncProtocolVersion.V1
+                    2L -> CarPlayUiSyncProtocolVersion.V2
+                    in 3..Long.MAX_VALUE -> CarPlayUiSyncProtocolVersion.V3
+                    else -> throw CarPlayUiSyncProtocolException("Invalid numeric UI Sync version")
+                }
+                else -> throw CarPlayUiSyncProtocolException("UI Sync version must be an integer")
+            }
+        }
+        val remoteIdentifier = typed["id"]?.let {
+            it as? String ?: throw CarPlayUiSyncProtocolException("UI Sync id must be a string")
         }
 
         return CarPlayUiSyncMessage(
@@ -319,6 +371,7 @@ object CarPlayUiSyncMessageFactory {
             noAck = noAck,
             vehicleId = vehicleId,
             version = version,
+            remoteIdentifier = remoteIdentifier,
         )
     }
 

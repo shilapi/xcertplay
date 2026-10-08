@@ -26,6 +26,9 @@ internal class MicrophoneUplink(
     private val config: MicrophoneConfig,
     microphoneGainPercent: Int,
 ) : Closeable {
+    private fun diagnostic(level: String, message: String, error: Throwable? = null) {
+        config.onTrace("MIC $level $message" + (error?.let { "\n${it.stackTraceToString()}" } ?: ""))
+    }
     private val microphoneGainPercent = MicrophoneGain.sanitize(microphoneGainPercent)
     private val running = AtomicBoolean(false)
     private val firstPacketLogged = AtomicBoolean(false)
@@ -41,7 +44,7 @@ internal class MicrophoneUplink(
             startCapture()
             true
         } catch (error: Exception) {
-            Log.e(TAG, "microphone start failed", error)
+            diagnostic("E", "microphone start failed", error)
             release()
             false
         }
@@ -54,7 +57,7 @@ internal class MicrophoneUplink(
             opusEncoder = OpusEncoder(
                 config.sampleRate,
                 config.bitrate ?: 48_000,
-                onFallback = { reason -> Log.w(TAG, "Opus encoder fallback: $reason") },
+                onFallback = { reason -> diagnostic("W", "Opus encoder fallback: $reason") },
             )
         }
 
@@ -74,9 +77,7 @@ internal class MicrophoneUplink(
             isDaemon = true
             start()
         }
-        Log.i(
-            TAG,
-            "microphone uplink started type=${config.audioType} codec=${config.codec} " +
+        diagnostic("I", "microphone uplink started type=${config.audioType} codec=${config.codec} " +
                 "captureRate=$MICROPHONE_CAPTURE_RATE_HZ outputRate=${config.sampleRate} " +
                 "channels=${config.channels} gain=${microphoneGainPercent}% " +
                 "frameMs=${config.frameMillis} port=${config.port}",
@@ -102,7 +103,7 @@ internal class MicrophoneUplink(
                     AudioRecord.READ_BLOCKING,
                 )
                 if (count < 0) {
-                    if (running.get()) Log.e(TAG, "microphone read failed code=$count")
+                    if (running.get()) diagnostic("E", "microphone read failed code=$count")
                     return
                 }
                 if (count == 0) continue
@@ -123,7 +124,7 @@ internal class MicrophoneUplink(
                 }
             }
         } catch (error: Exception) {
-            if (running.get()) Log.e(TAG, "microphone capture failed", error)
+            if (running.get()) diagnostic("E", "microphone capture failed", error)
         } finally {
             running.set(false)
             try {
@@ -140,6 +141,7 @@ internal class MicrophoneUplink(
         counters: MicrophoneCounters,
         monoFrame: ByteArray,
     ) {
+        config.onTrace("MIC captured type=${config.payloadType} pcmHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(monoFrame)}")
         val bodies = if (config.codec == AudioCodecKind.OPUS) {
             opusEncoder?.encode(monoFrame).orEmpty()
         } else {
@@ -153,17 +155,18 @@ internal class MicrophoneUplink(
                 body = body,
                 samples = config.rtpSamplesPerPacket,
             )
+            config.onTrace("MIC TX attempt type=${config.payloadType} peer=${config.host}:${config.port} codec=${config.codec} payloadHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(body)} wireHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(packet)}")
             try {
                 activeSocket.send(DatagramPacket(packet, packet.size, config.host, config.port))
+                config.onTrace("MIC TX sent type=${config.payloadType} bytes=${packet.size}")
                 if (firstPacketLogged.compareAndSet(false, true)) {
-                    Log.i(
-                        TAG,
-                        "microphone first packet bytes=${packet.size} body=${body.size} " +
+                    diagnostic("I", "microphone first packet bytes=${packet.size} body=${body.size} " +
                             "head=${packet.copyOf(minOf(packet.size, 16)).toHexString()} " +
                             "peer=${config.host.hostAddress}:${config.port}",
                     )
                 }
             } catch (error: Exception) {
+                config.onTrace("MIC TX failed ${error.stackTraceToString()}")
                 if (running.get()) throw error
             }
         }

@@ -128,21 +128,21 @@ class Iap2Session private constructor(
             traceContext: String = "wired",
             onTrace: (String) -> Unit = {},
         ): Iap2Session =
-            Iap2Session(Iap2CsmChannel.open(underlying), traceContext, onTrace)
+            Iap2Session(Iap2CsmChannel.open(com.shilapi.xcertplay.transport.TracingDuplexByteStream(underlying, traceContext, onTrace)), traceContext, onTrace)
 
         fun openWireless(
             underlying: BlockingDuplexByteStream,
             traceContext: String = "wireless",
             onTrace: (String) -> Unit = {},
         ): Iap2Session =
-            Iap2Session(Iap2CsmChannel.openWireless(underlying), traceContext, onTrace)
+            Iap2Session(Iap2CsmChannel.openWireless(com.shilapi.xcertplay.transport.TracingDuplexByteStream(underlying, traceContext, onTrace)), traceContext, onTrace)
 
         fun openTunnel(
             underlying: BlockingDuplexByteStream,
             traceContext: String = "wireless-tunnel",
             onTrace: (String) -> Unit = {},
         ): Iap2Session =
-            Iap2Session(Iap2CsmChannel.openTunnel(underlying), traceContext, onTrace)
+            Iap2Session(Iap2CsmChannel.openTunnel(com.shilapi.xcertplay.transport.TracingDuplexByteStream(underlying, traceContext, onTrace)), traceContext, onTrace)
 
         fun wrap(
             channel: Iap2CsmChannel,

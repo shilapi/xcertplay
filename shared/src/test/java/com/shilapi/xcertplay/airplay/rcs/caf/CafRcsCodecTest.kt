@@ -13,14 +13,14 @@ import org.junit.Test
 
 class CafRcsCodecTest {
     @Test
-    fun configRequestUsesBplistOuterAndOpackInner() {
+    fun configRequestUsesBinaryPlistBlobs() {
         val frame = CarAccessoryMessages.configRequest(pluginId = 7, transactionId = 42)
         @Suppress("UNCHECKED_CAST")
         val wrapper = BplistCodec.decode(frame.rcsBody) as Map<Any?, Any?>
         @Suppress("UNCHECKED_CAST")
         val params = wrapper["params"] as Map<Any?, Any?>
         @Suppress("UNCHECKED_CAST")
-        val outer = OpackCodec.decode(params["data"] as ByteArray) as Map<Any?, Any?>
+        val outer = BplistCodec.decode(params["data"] as ByteArray) as Map<Any?, Any?>
 
         assertEquals(7L, outer["pluginID"])
         val reader = CarAccessoryMessages.reader(frame.rcsBody)
@@ -161,6 +161,9 @@ class CafRcsCodecTest {
                                         "format" to 9L,
                                         "writable" to true,
                                         "initialValue" to 22.5,
+                                        "minimumValue" to 16.0,
+                                        "maximumValue" to 32.0,
+                                        "stepValue" to 0.5,
                                         "priority" to 1L,
                                         "oemExtension" to "kept",
                                     ),

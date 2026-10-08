@@ -17,10 +17,18 @@ import kotlin.math.min
 data class RcsMessage(
     val messageType: Int,
     val body: ByteArray,
+    private val transportHeader: ByteArray = ByteArray(0),
 ) {
-    fun encoded(): ByteArray = ApTransportPackageCodec.create(messageType, body).encoded()
+    val packageType: Int get() = if (transportHeader.isEmpty()) ApTransportPackageCodec.PACKAGE_TYPE_ASYNC
+        else ApTransportPackageCodec.readPackageType(transportHeader)
+    fun encoded(): ByteArray = ApTransportPackageCodec.create(messageType, body, transportHeader).encoded()
+    fun transportReply(status: Int = 0): RcsMessage = fromPackage(ApTransportPackageCodec.reply(
+        ApTransportPackageCodec.create(messageType, body, transportHeader), status))
 
     companion object {
+        fun fromPackage(value: ApTransportPackage): RcsMessage =
+            RcsMessage(value.messageType, value.body, value.headerBytes())
+
         fun comm(body: ByteArray): RcsMessage =
             RcsMessage(ApTransportPackageCodec.MESSAGE_TYPE_COMM, body)
     }
@@ -39,6 +47,7 @@ class RcsChannel private constructor(
     private val socket: Socket,
     private val frameCodec: RcsFrameCodec,
     private val onTrace: (String) -> Unit,
+    private val tracePayloads: Boolean,
 ) : Closeable {
     private val sendLock = Object()
     private val receiveLock = Object()
@@ -63,13 +72,14 @@ class RcsChannel private constructor(
             ensureOpen()
             try {
                 val encoded = frameCodec.encrypt(message.encoded())
+                if (tracePayloads) trace("RCS TX wireHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(encoded)} plainHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(message.encoded())}")
                 socket.getOutputStream().apply {
                     write(encoded)
                     flush()
                 }
                 trace(
                     "RCS TX type=0x${message.messageType.toString(16)} bytes=${message.body.size} " +
-                        "bodyHex=${message.body.toHex()}",
+                        if (tracePayloads) "bodyHex=${message.body.toHex()}" else "payloadTrace=summary",
                 )
             } catch (failure: Throwable) {
                 trace(
@@ -120,6 +130,7 @@ class RcsChannel private constructor(
                 }
                 if (read == 0) continue
 
+                if (tracePayloads) trace("RCS RX wireHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(buffer.copyOf(read))}")
                 incomingCiphertext += buffer.copyOf(read)
                 val decrypted = try {
                     frameCodec.decrypt(incomingCiphertext)
@@ -128,6 +139,7 @@ class RcsChannel private constructor(
                     throw RcsProtocolException("Invalid RCS encrypted frame", failure)
                 }
                 incomingCiphertext = decrypted.rest
+                if (tracePayloads) trace("RCS RX decryptedHex=${com.shilapi.xcertplay.airplay.ProtocolTraceFormatter.hex(decrypted.data)}")
                 incomingPlaintext += decrypted.data
 
                 val decoded = try {
@@ -158,9 +170,13 @@ class RcsChannel private constructor(
         val packageValue = pendingPackages.pollFirst() ?: return null
         trace(
             "RCS RX type=0x${packageValue.messageType.toString(16)}" +
-                " bytes=${packageValue.body.size} bodyHex=${packageValue.body.toHex()}",
+                " packageType=0x${packageValue.packageType.toString(16)}" +
+                " groupID=0x${java.lang.Long.toUnsignedString(packageValue.groupId, 16)}" +
+                " replyToken=0x${java.lang.Long.toUnsignedString(packageValue.replyToken, 16)}" +
+                " replyStatus=${packageValue.replyStatus} bytes=${packageValue.body.size} " +
+                if (tracePayloads) "bodyHex=${packageValue.body.toHex()}" else "payloadTrace=summary",
         )
-        return RcsMessage(packageValue.messageType, packageValue.body)
+        return RcsMessage.fromPackage(packageValue)
     }
 
     private fun trace(message: String) {
@@ -190,9 +206,10 @@ class RcsChannel private constructor(
             readKey: ByteArray,
             writeKey: ByteArray,
             onTrace: (String) -> Unit = {},
+            tracePayloads: Boolean = true,
         ): RcsChannel {
             socket.tcpNoDelay = true
-            return RcsChannel(socket, RcsFrameCodec.duplex(readKey, writeKey), onTrace)
+            return RcsChannel(socket, RcsFrameCodec.duplex(readKey, writeKey), onTrace, tracePayloads)
         }
 
         fun connect(
@@ -220,6 +237,7 @@ class RcsChannel private constructor(
             port: Int = 0,
             backlog: Int = 4,
             onTrace: (String) -> Unit = {},
+            tracePayloads: Boolean = true,
         ): RcsListener =
             RcsListener(
                 serverSocket = ServerSocket().apply {
@@ -229,6 +247,7 @@ class RcsChannel private constructor(
                 readKey = readKey,
                 writeKey = writeKey,
                 onTrace = onTrace,
+                tracePayloads = tracePayloads,
             )
     }
 }
@@ -245,6 +264,7 @@ class RcsListener internal constructor(
     private val readKey: ByteArray,
     private val writeKey: ByteArray,
     private val onTrace: (String) -> Unit,
+    private val tracePayloads: Boolean,
 ) : Closeable {
     val port: Int
         get() = serverSocket.localPort
@@ -264,7 +284,7 @@ class RcsListener internal constructor(
         }
         onTrace("RCS accepted peer=${accepted.remoteSocketAddress}")
         accepted.tcpNoDelay = true
-        return RcsChannel.open(accepted, readKey, writeKey, onTrace)
+        return RcsChannel.open(accepted, readKey, writeKey, onTrace, tracePayloads)
     }
 
     override fun close() {

@@ -81,7 +81,9 @@ class AirPlaySession(
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
     private var pendingNightMode: Boolean? = null
+    private val displayControl = CarPlayDisplayControlSession(config, ::sendCommand, ::trace)
     @Volatile private var negotiatedFeatures: Set<AirPlayFeature> = emptySet()
+    private var controlFeaturesNegotiated = false
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock { message -> trace(message) }
@@ -132,6 +134,11 @@ class AirPlaySession(
     }
 
     private fun sendCommandLocked(command: Map<String, Any?>): Boolean {
+        val required = AirPlayEventCommands.requiredFeature(command)
+        if (required != null && !isFeatureEnabled(required)) {
+            trace("AirPlay command blocked type=${command["type"]}: feature=${required.wireName} not negotiated")
+            return false
+        }
         val socket = eventSocket ?: return false
         val cipher = eventCipher ?: return false
         eventCseq++
@@ -147,6 +154,7 @@ class AirPlaySession(
         )
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
+            trace("airplay event TX wireHex=${ProtocolTraceFormatter.hex(bytes)}")
             val output = socket.getOutputStream()
             output.write(bytes)
             output.flush()
@@ -200,8 +208,8 @@ class AirPlaySession(
     }
 
     fun invokeSiri() {
-        sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 2)))
-        sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 3)))
+        sendCommand(AirPlayEventCommands.siri(2))
+        sendCommand(AirPlayEventCommands.siri(3))
     }
 
     fun sendIapMessage(data: ByteArray, timeoutMillis: Long = 0L): Boolean {
@@ -244,20 +252,19 @@ class AirPlaySession(
     private fun sendPendingNightModeLocked(): Boolean {
         val night = pendingNightMode ?: return true
         val sent = sendCommandLocked(
-            linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)),
+            AirPlayEventCommands.nightMode(night),
         )
         if (sent) pendingNightMode = null
         return sent
     }
 
-    private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
-        sendCommand(
-            linkedMapOf(
-                "type" to "hidSendReport",
-                "uuid" to uid.toString(16),
-                "hidReport" to report,
-            ),
-        )
+    private fun sendHidReport(uid: Int, report: ByteArray): Boolean = sendCommand(AirPlayEventCommands.hidDeviceReport(uid, report))
+
+    /** Applies view-area changes through the event channel without rebuilding the RTSP connection. */
+    fun updateViewArea(displayUuid: String, index: Int, adjacent: List<Int> = emptyList(), animationMillis: Long = 0) =
+        displayControl.updateViewArea(displayUuid, index, adjacent, animationMillis)
+
+    fun updateDisplayInfo(displayUuid: String, display: AirPlayDisplayConfig) = displayControl.updateDisplay(displayUuid, display)
 
     private fun runControl() {
         val input = BufferedInputStream(socket.getInputStream())
@@ -272,6 +279,7 @@ class AirPlaySession(
                     closeReason = "peer EOF"
                     break
                 }
+                trace("airplay control RX wireHex=${ProtocolTraceFormatter.hex(buffer.copyOf(count))}")
                 var plaintext = buffer.copyOf(count)
                 val activeCipher = cipher
                 if (activeCipher != null) {
@@ -325,7 +333,9 @@ class AirPlaySession(
                             "decoded=${ProtocolTraceFormatter.bplist(response.body)} " +
                             "wireHex=${wire.toHex()}",
                     )
-                    output.write(cipher?.encrypt(wire) ?: wire)
+                    val transportWire = cipher?.encrypt(wire) ?: wire
+                    trace("airplay control TX transportWireHex=${ProtocolTraceFormatter.hex(transportWire)}")
+                    output.write(transportWire)
                     if (cipher == null && pairVerify.controlKeys != null) {
                         val keys = pairVerify.controlKeys!!
                         cipher = ControlCipher(keys.readKey, keys.writeKey)
@@ -370,7 +380,10 @@ class AirPlaySession(
                 else RtspMessage.Response(headers = mapOf("Content-Type" to OCTET_CONTENT_TYPE), body = body)
             }
             path.endsWith("/info") -> {
-                val info = AirPlayInfoPlist.build(config)
+                // The phone can request /info after control SETUP. Its strict sidecar/display
+                // validation uses enabledFeatures, not every locally available capability.
+                val infoFeatures = negotiatedFeatures.takeIf { controlFeaturesNegotiated }
+                val info = AirPlayInfoPlist.build(config, infoFeatures)
                 val requestInfo = try {
                     AirPlayInfoRequestFactory.decode(request.body)
                 } catch (error: Exception) {
@@ -391,6 +404,7 @@ class AirPlaySession(
                             "unrecognized=${requestInfo.unrecognized.keys.sorted()}",
                     )
                 }
+                displayControl.info(requestInfo)
                 Log.i(
                     TAG,
                     "airplay /info features=${info["features"]} " +
@@ -402,6 +416,12 @@ class AirPlaySession(
                         "microphone=${config.microphone}",
                 )
                 debugLog("airplay /info displays=${info["displays"]}")
+                debugLog("airplay /info displayPanels=${info["displayPanels"] ?: "absent"}")
+                debugLog(
+                    "airplay /info featureScope=${if (infoFeatures == null) "capabilities" else "negotiated"} " +
+                        "enabled=${infoFeatures?.map { it.wireName }} " +
+                        "sidecars=${AirPlayFeature.entries.mapNotNull { it.infoResponseKey }.filter { it in info }}",
+                )
                 RtspMessage.Response(
                     headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
                     body = BplistCodec.encode(info),
@@ -425,6 +445,7 @@ class AirPlaySession(
 
     private fun notifySetupResponseSent() {
         try {
+            if (controlFeaturesNegotiated) displayControl.negotiated(negotiatedFeatures)
             media.onSetupResponseSent(this)
         } catch (error: Exception) {
             Log.w(TAG, "airplay SETUP response callback failed", error)
@@ -432,8 +453,7 @@ class AirPlaySession(
     }
 
     private fun debugLog(message: String, uiVisible: Boolean = true) {
-        Log.i(TAG, message)
-        if (!uiVisible) return
+        ProtocolLog.info(TAG, message)
         try {
             listener.onDebugLog(message)
         } catch (error: Exception) {
@@ -494,11 +514,20 @@ class AirPlaySession(
         )
         AirPlayFeatureNegotiation.validateEnabledFeatures(config, proposal.enabledFeatureSet)
         negotiatedFeatures = proposal.enabledFeatureSet
+        controlFeaturesNegotiated = true
         response["enabledFeatures"] = proposal.enabledFeatures
         debugLog(
             "airplay SETUP feature proposal requested=${proposal.requestedFeatures} " +
                 "supported=${proposal.supportedFeatures} enabled=${proposal.enabledFeatures}",
         )
+        if (config.ultra != null) {
+            debugLog("Ultra UI negotiation uiSyncRequested=${"uiSync" in proposal.requestedFeatures} " +
+                "uiSyncAccepted=${AirPlayFeature.UI_SYNC in proposal.enabledFeatureSet} " +
+                "fileTransferRequested=${"fileTransfer" in proposal.requestedFeatures} " +
+                "fileTransferAccepted=${AirPlayFeature.FILE_TRANSFER in proposal.enabledFeatureSet} " +
+                "assetIdentity=${if (config.ultra.clusterAsset == null) "unconfigured" else "configured"}; " +
+                "CAF and alternate video do not establish Ultra UI readiness")
+        }
         return RtspMessage.Response(
             headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
             body = BplistCodec.encode(response),
@@ -510,9 +539,14 @@ class AirPlaySession(
         for (entry in streams) {
             val stream = asMap(entry) ?: continue
             val type = long(stream["type"])?.toInt() ?: continue
-            debugLog("airplay SETUP stream type=$type payload=$stream")
+            debugLog("airplay SETUP stream type=$type")
+            trace("airplay SETUP stream type=$type payload=$stream")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
+                    if (type == STREAM_TYPE_ALT_SCREEN && !isFeatureEnabled(AirPlayFeature.ALT_SCREEN)) {
+                        debugLog("airplay stream rejected type=111: altScreen was not negotiated")
+                        continue
+                    }
                     val port = media.onScreen(this, type, stream)
                     debugLog("airplay screen stream type=$type dataPort=${port ?: "rejected"}")
                     if (port != null) {
@@ -552,10 +586,12 @@ class AirPlaySession(
     private fun handleCommand(request: RtspMessage.Request): RtspMessage.Response {
         val body = try {
             asMap(BplistCodec.decode(request.body)) ?: emptyMap()
-        } catch (_: Exception) {
-            emptyMap<String, Any?>()
+        } catch (error: Exception) {
+            trace("AirPlay command decode failed bodyHex=${request.body.toHex()} reason=${error.message}")
+            return RtspMessage.Response(status = 400)
         }
         val type = string(body["type"])
+        if (type.isBlank()) { trace("AirPlay command missing type"); return RtspMessage.Response(status = 400) }
         val params = asMap(body["params"]) ?: emptyMap()
         debugLog("airplay command type=$type keys=${params.keys.sorted()}")
         if (type == "modesChanged") {
@@ -569,6 +605,10 @@ class AirPlaySession(
             debugLog("airplay modesChanged resources=${resources ?: "missing"}")
         }
         if (type == "requestUI") listener.onHostUiRequested(this)
+        try { displayControl.receive(type, params) } catch (error: Exception) {
+            trace("Ultra command rejected type=$type reason=${error.message}")
+            return RtspMessage.Response(status = 400)
+        }
         listener.onCommand(this, type, params)
         return RtspMessage.Response(status = 200)
     }
@@ -588,9 +628,9 @@ class AirPlaySession(
 
         debugLog(
             "airplay TEARDOWN types=$types activeBefore=$activeStreams " +
-                "body=${request.body.size} bytes payload=$decodedBody",
+                "body=${request.body.size} bytes",
         )
-        trace("airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHex()}")
+        trace("airplay TEARDOWN payload=$decodedBody raw${request.body.size}Hex=${request.body.toHex()}")
 
         if (types.isEmpty()) {
             activeStreams.toList().forEach { media.onTeardown(this, it) }
@@ -687,6 +727,7 @@ class AirPlaySession(
             synchronized(eventWriteLock) {
                 sendPendingNightModeLocked()
             }
+            displayControl.flush()
             runEventRead(socket)
         } catch (error: Exception) {
             if (!closed.get()) {
@@ -707,6 +748,7 @@ class AirPlaySession(
                 val count = input.read(buffer)
                 if (count < 0) break
                 val cipher = eventCipher ?: break
+                trace("airplay event RX wireHex=${ProtocolTraceFormatter.hex(buffer.copyOf(count))}")
                 encrypted += buffer.copyOf(count)
                 val decrypted = try {
                     cipher.decrypt(encrypted)
@@ -719,11 +761,14 @@ class AirPlaySession(
                 val parsed = RtspMessage.parseMessages(plaintext)
                 plaintext = parsed.rest
                 for (message in parsed.messages) {
+                    trace("airplay event parsed ${message.method} ${message.path} headers=${message.headers} bodyHex=${ProtocolTraceFormatter.hex(message.body)} decoded=${ProtocolTraceFormatter.bplist(message.body)}")
                     if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) continue
                     debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )
-                    val response = RtspMessage.buildResponse(message, RtspMessage.Response(status = 200))
+                    val commandResponse = if (message.method == "POST" && message.path.substringBefore("?").endsWith("/command"))
+                        handleCommand(message) else RtspMessage.Response(status = 200)
+                    val response = RtspMessage.buildResponse(message, commandResponse)
                     trace(
                         "airplay event RX ${message.method} ${message.path} " +
                             "headers=${message.headers} body=${message.body.size}B " +
@@ -731,11 +776,13 @@ class AirPlaySession(
                             "decoded=${ProtocolTraceFormatter.bplist(message.body)}",
                     )
                     trace(
-                        "airplay event TX status=200 wireHex=${response.toHex()} " +
-                            "decoded=${ProtocolTraceFormatter.pretty(RtspMessage.Response(status = 200))}",
+                        "airplay event TX status=${commandResponse.status} wireHex=${response.toHex()} " +
+                            "decoded=${ProtocolTraceFormatter.pretty(commandResponse)}",
                     )
                     synchronized(eventWriteLock) {
-                        output.write(cipher.encrypt(response))
+                        val encryptedResponse = cipher.encrypt(response)
+                        trace("airplay event TX responseWireHex=${ProtocolTraceFormatter.hex(encryptedResponse)}")
+                        output.write(encryptedResponse)
                         output.flush()
                     }
                 }

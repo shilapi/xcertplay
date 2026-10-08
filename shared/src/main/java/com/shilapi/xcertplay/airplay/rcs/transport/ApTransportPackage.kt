@@ -3,9 +3,9 @@ package com.shilapi.xcertplay.airplay.rcs.transport
 /**
  * APTransport package used by CarPlay type-130 RCS streams.
  *
- * Only the package size (offset 0, big-endian), message type (offset 16, big-endian), and body
- * offset (32) are confirmed by the Ultra references. The remaining header bytes are transport
- * metadata whose individual fields are not confirmed and are preserved verbatim.
+ * The 32-byte header contains big-endian size (0), package type (4), group ID (8), message
+ * type (16), reply token (20), and reply status (28). New messages use the asynchronous `asyn`
+ * package type; explicit header templates preserve their transport metadata verbatim.
  */
 class ApTransportPackage private constructor(
     private val header: ByteArray,
@@ -15,6 +15,15 @@ class ApTransportPackage private constructor(
 
     val messageType: Int
         get() = ApTransportPackageCodec.readMessageType(header)
+
+    /** Immutable copy of the transport metadata, including sync reply correlation. */
+    fun headerBytes(): ByteArray = header.copyOf()
+
+    val packageType: Int get() = ApTransportPackageCodec.readPackageType(header)
+
+    val groupId: Long get() = ApTransportPackageCodec.readU64Be(header, 8)
+    val replyToken: Long get() = ApTransportPackageCodec.readU64Be(header, 20)
+    val replyStatus: Int get() = ApTransportPackageCodec.readU32Be(header, 28).toInt()
 
     val encodedSize: Int
         get() = ApTransportPackageCodec.readSize(header)
@@ -48,17 +57,22 @@ class ApTransportProtocolException(message: String) : IllegalArgumentException(m
  */
 object ApTransportPackageCodec {
     const val HEADER_SIZE = 32
+    const val PACKAGE_TYPE_OFFSET = 4
+    const val PACKAGE_TYPE_ASYNC = 0x6173796e
+    const val PACKAGE_TYPE_SYNC = 0x73796e63
+    const val PACKAGE_TYPE_REPLY = 0x72706c79
     const val MESSAGE_TYPE_OFFSET = 16
     const val BODY_OFFSET = 32
     const val MESSAGE_TYPE_COMM = 0x636f6d6d
     const val DEFAULT_MAX_PACKAGE_BYTES = 4 * 1024 * 1024
 
     /**
-     * Creates a `comm` package.
+     * Creates an asynchronous `comm` package, or uses an explicit transport header template.
      *
      * [uninterpretedHeader] must be either empty or a full 32-byte template. The size and message
-     * type fields are overwritten. Callers that only have confirmed CAF/RCS data should use the
-     * default empty template; offsets 4/8/20/28 have no public interpretation yet.
+     * type fields are overwritten. With the default empty template, package type is `asyn`
+     * and group ID, reply token, and reply status are zero. An explicit template retains those
+     * fields, including its original package type.
      */
     fun comm(
         body: ByteArray,
@@ -89,7 +103,9 @@ object ApTransportPackageCodec {
         }
 
         val header = if (uninterpretedHeader.isEmpty()) {
-            ByteArray(HEADER_SIZE)
+            ByteArray(HEADER_SIZE).also {
+                putU32Be(it, PACKAGE_TYPE_OFFSET, PACKAGE_TYPE_ASYNC.toLong())
+            }
         } else {
             require(uninterpretedHeader.size == HEADER_SIZE) {
                 "APTransport header template must be empty or $HEADER_SIZE bytes"
@@ -99,6 +115,19 @@ object ApTransportPackageCodec {
         putU32Be(header, 0, encodedSize)
         putU32Be(header, MESSAGE_TYPE_OFFSET, messageType.toLong() and UINT32_MAX)
         return ApTransportPackage.fromEncodedHeader(header, body)
+    }
+
+    /** Reply metadata follows APTransport stream_sendReplyMessage, not a new asynchronous message. */
+    fun reply(request: ApTransportPackage, status: Int = 0, body: ByteArray = ByteArray(0),
+        groupId: Long = 0): ApTransportPackage {
+        require(request.packageType == PACKAGE_TYPE_SYNC) { "Only synchronous requests have transport replies" }
+        val header = request.headerBytes()
+        putU32Be(header, PACKAGE_TYPE_OFFSET, PACKAGE_TYPE_REPLY.toLong())
+        // The firmware writes the stream's group ID; our streams use the default group zero.
+        putU32Be(header, 8, groupId ushr 32)
+        putU32Be(header, 12, groupId and UINT32_MAX)
+        putU32Be(header, 28, status.toLong() and UINT32_MAX)
+        return create(request.messageType, body, header)
     }
 
     /**
@@ -156,6 +185,9 @@ object ApTransportPackageCodec {
         return decoded.packages.single()
     }
 
+    internal fun readPackageType(header: ByteArray): Int =
+        readU32Be(header, PACKAGE_TYPE_OFFSET).toInt()
+
     internal fun readMessageType(header: ByteArray): Int =
         readU32Be(header, MESSAGE_TYPE_OFFSET).toInt()
 
@@ -165,7 +197,10 @@ object ApTransportPackageCodec {
     private fun readSize(bytes: ByteArray, offset: Int): Int =
         readU32Be(bytes, offset).toInt()
 
-    private fun readU32Be(bytes: ByteArray, offset: Int): Long {
+    internal fun readU64Be(bytes: ByteArray, offset: Int): Long =
+        (readU32Be(bytes, offset) shl 32) or readU32Be(bytes, offset + 4)
+
+    internal fun readU32Be(bytes: ByteArray, offset: Int): Long {
         requireRange(bytes, offset, 4)
         return ((bytes[offset].toLong() and 0xff) shl 24) or
             ((bytes[offset + 1].toLong() and 0xff) shl 16) or

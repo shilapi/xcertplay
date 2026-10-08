@@ -87,8 +87,8 @@ object Iap2Endpoints {
             field(5, "hardwareVersion", Iap2WireType.STRING, required = true),
             field(6, "MessagesSentByAccessory", Iap2WireType.U16_LIST, required = true),
             field(7, "MessagesReceivedFromDevice", Iap2WireType.U16_LIST, required = true),
-            field(8, "powerProvidingCapability", Iap2WireType.U8),
-            field(9, "maximumCurrentDrawnFromDevice", Iap2WireType.U16),
+            field(8, "powerProvidingCapability", Iap2WireType.U8, required = true),
+            field(9, "maximumCurrentDrawnFromDevice", Iap2WireType.U16, required = true),
             field(10, "externalAccessoryProtocols", Iap2WireType.GROUP),
             field(12, "currentLanguage", Iap2WireType.STRING, required = true),
             field(13, "supportedLanguages", Iap2WireType.STRING_LIST, required = true),
@@ -137,11 +137,12 @@ object Iap2Endpoints {
                 Iap2WireType.GROUP,
                 children = listOf(
                     field(0, "componentID", Iap2WireType.U16),
-                    field(1, "SSID", Iap2WireType.STRING),
+                    field(1, "componentName", Iap2WireType.STRING),
                     field(2, "isSupported", Iap2WireType.VOID),
                     field(3, "transportIdentifier", Iap2WireType.U16),
-                    field(4, "isAvailable", Iap2WireType.VOID),
+                    field(4, "supportsWirelessCarPlay", Iap2WireType.VOID),
                     field(5, "isEnabled", Iap2WireType.VOID),
+                    field(6, "bluetoothMAC", Iap2WireType.STRING),
                 ),
             ),
         ),
@@ -374,7 +375,7 @@ object Iap2Endpoints {
         Iap2Direction.ACCESSORY_TO_IPHONE,
         fields = listOf(
             field(0, "BSSID", Iap2WireType.BYTES),
-            field(1, "SSID", Iap2WireType.STRING),
+            field(1, "componentName", Iap2WireType.STRING),
             field(2, "passphrase", Iap2WireType.STRING),
             field(3, "securityType", Iap2WireType.U8),
             field(4, "channel", Iap2WireType.U8),
@@ -558,7 +559,38 @@ object Iap2Endpoints {
      * The remaining reference endpoints are registered here without a claimed schema. Their body
      * can still be built and read through the generic body API, but no enum or field ID is invented.
      */
+    // IDs confirmed by endpoint audit §6.7; uncertain body layouts remain in the configurable factory.
+    val USER_NOTIFICATION_RESPONSE = registryEndpoint(0x0002, "UserNotificationResponse", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_AUTH_SETUP = registryEndpoint(0x5100, "RequestAuthSetup", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_AUTH_START = registryEndpoint(0x5110, "RequestAuthStart", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val AUTH_START = registryEndpoint(0x5111, "AuthStart", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_AUTH_CERT = registryEndpoint(0x5112, "RequestAuthCert", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val AUTH_CERT = registryEndpoint(0x5113, "AuthCert", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_AUTH_CHALLENGE_RESPONSE = registryEndpoint(0x5115, "RequestAuthChallengeResponse", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val MFI4_AUTHENTICATION_SUCCEEDED = registryEndpoint(0x51ff, "MFi4AuthenticationSucceeded", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_RELAY_READ = registryEndpoint(0x5163, "RequestiAP2RelayRead", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val RELAY_REMOTE = registryEndpoint(0x5164, "DeviceiAP2RelayRemote", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val TUNNEL_DATA = registryEndpoint(0x5500, "TunnelDataiAP2Msg", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val TUNNEL_DATA_REPLY = registryEndpoint(0x5501, "TunnelDataiAP2MsgReply", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val REQUEST_RELAY_ACCESSORY_INFO = registryEndpoint(0x5502, "RequestRelayAccessoryInformation", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+    val RELAY_ACCESSORY_INFO = registryEndpoint(0x5503, "RelayAccessoryInformationUpdate", "MFi4Relay", Iap2Direction.BIDIRECTIONAL)
+
     val ALL: List<Iap2Endpoint> = listOf(
+        USER_NOTIFICATION_RESPONSE,
+        REQUEST_AUTH_SETUP,
+        REQUEST_AUTH_START,
+        AUTH_START,
+        REQUEST_AUTH_CERT,
+        AUTH_CERT,
+        REQUEST_AUTH_CHALLENGE_RESPONSE,
+        MFI4_AUTHENTICATION_SUCCEEDED,
+        REQUEST_RELAY_READ,
+        RELAY_REMOTE,
+        TUNNEL_DATA,
+        TUNNEL_DATA_REPLY,
+        REQUEST_RELAY_ACCESSORY_INFO,
+        RELAY_ACCESSORY_INFO,
+
         START_IDENTIFICATION,
         IDENTIFICATION_INFORMATION,
         IDENTIFICATION_ACCEPTED,

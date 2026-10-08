@@ -18,6 +18,8 @@ class RemoteMfiAuthenticationClient(
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
     private val maximumAttempts: Int = DEFAULT_MAXIMUM_ATTEMPTS,
     private val onTrace: (String) -> Unit = {},
+    private val configuredMfi4SentMessages: Set<Int>? = null,
+    private val configuredMfi4ReceivedMessages: Set<Int>? = null,
 ) : MfiAuthenticator {
     private data class CertificateInfo(
         val type: MfiCertificateType,
@@ -25,6 +27,8 @@ class RemoteMfiAuthenticationClient(
         val wireCertificate: ByteArray,
         val iap2Certificate: ByteArray,
         val baaCertificates: BaaCertificatePair?,
+        val mfi4SentMessages: Set<Int>,
+        val mfi4ReceivedMessages: Set<Int>,
     )
 
     private data class HttpResponse(
@@ -58,6 +62,11 @@ class RemoteMfiAuthenticationClient(
         )
         Unit
     }
+
+    override val mfi4SentMessages: Set<Int>
+        get() = synchronized(operationLock) { configuredMfi4SentMessages ?: loadCertificateInfo().mfi4SentMessages }
+    override val mfi4ReceivedMessages: Set<Int>
+        get() = synchronized(operationLock) { configuredMfi4ReceivedMessages ?: loadCertificateInfo().mfi4ReceivedMessages }
 
     override fun protocolMajor(): Int = synchronized(operationLock) {
         loadCertificateInfo().protocolMajor
@@ -105,6 +114,17 @@ class RemoteMfiAuthenticationClient(
             throw MfiInvalidDataException("Invalid remote signature length ${signature.size}")
         }
         signature
+    }
+
+    override fun mfi4Exchange(frame: com.shilapi.xcertplay.iap2.wire.Iap2Frame): com.shilapi.xcertplay.iap2.wire.Iap2Frame? = synchronized(operationLock) {
+        require(frame.messageId in mfi4ReceivedMessages) { "Remote MFi4 endpoint was not declared: ${frame.messageId}" }
+        val encoded = Base64.getEncoder().encodeToString(frame.encodedFrame())
+        onTrace("mfi4 remote exchange id=0x${frame.messageId.toString(16)}; service contract POST /mfi4/exchange frame=base64 complete CSM")
+        val response = request("POST", "/mfi4/exchange", "{\"frame\":\"$encoded\"}", retry = false)
+        val reply = RemoteMfiJson.optionalString(response, "frame")
+        if (reply == null) null else com.shilapi.xcertplay.iap2.message.Iap2UltraMessages.nestedFrame(decodeBase64(reply, "frame")).also {
+            require(it.messageId in mfi4SentMessages) { "Remote MFi4 response endpoint was not declared: ${it.messageId}" }
+        }
     }
 
     private fun loadCertificateInfo(): CertificateInfo {
@@ -159,6 +179,8 @@ class RemoteMfiAuthenticationClient(
             wireCertificate = certificate.copyOf(),
             iap2Certificate = iap2Certificate,
             baaCertificates = baaCertificates,
+            mfi4SentMessages = RemoteMfiJson.endpointIds(response, "mfi4SentMessages"),
+            mfi4ReceivedMessages = RemoteMfiJson.endpointIds(response, "mfi4ReceivedMessages"),
         ).also { certificateInfo = it }
     }
 
@@ -322,6 +344,21 @@ internal object RemoteMfiJson {
     fun optionalString(json: String, name: String): String? {
         val match = stringPattern(name).find(json) ?: return null
         return decodeJsonString(match.groupValues[1])
+    }
+
+    fun endpointIds(json: String, name: String): Set<Int> {
+        val key = Regex("\"${Regex.escape(name)}\"" + "\\s*:").find(json) ?: return emptySet()
+        val value = json.substring(key.range.last + 1).trimStart()
+        if (!value.startsWith("[")) throw MfiInvalidDataException("Remote MFI '$name' must be an array")
+        val end = value.indexOf(']')
+        if (end < 0) throw MfiInvalidDataException("Remote MFI '$name' array is truncated")
+        val items = value.substring(1, end).trim()
+        if (items.isEmpty()) return emptySet()
+        return items.split(',').map { item ->
+            val id = item.trim().toIntOrNull()
+            if (id == null || id !in 0..0xffff) throw MfiInvalidDataException("Remote MFI '$name' contains an invalid endpoint")
+            id
+        }.toSet()
     }
 
     fun integer(json: String, name: String): Int {

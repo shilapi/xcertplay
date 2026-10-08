@@ -20,11 +20,12 @@ enum class VideoCodec { H264, H265 }
  * (avcC/hvcC) or a ChaCha20-Poly1305 sealed VideoFrame. The key is the DataStream output key
  * and the per-frame nonce is an 8-byte little-endian counter.
  */
-class ScreenStream(private val key: ByteArray) : Closeable {
+class ScreenStream(private val key: ByteArray, private val onTrace: (String) -> Unit = {}) : Closeable {
     interface Listener {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
         fun onFrame(naluBytes: ByteArray) {}
+        fun onFrame(naluBytes: ByteArray, presentationTimeUs: Long?) = onFrame(naluBytes)
         fun onClosed(cause: Throwable?) {}
     }
 
@@ -70,13 +71,16 @@ class ScreenStream(private val key: ByteArray) : Closeable {
             val input = sock.getInputStream()
             while (!closed.get()) {
                 val header = readFully(input, HEADER_LEN) ?: break
+                onTrace("VIDEO RX headerHex=${ProtocolTraceFormatter.hex(header)}")
                 val bodySize = readU32Le(header, 0)
                 if (bodySize < 0 || bodySize > MAX_BODY) break
                 val body = readFully(input, bodySize) ?: break
+                onTrace("VIDEO RX counter=${frameCounter.get()} headerHex=${ProtocolTraceFormatter.hex(header)} bodyHex=${ProtocolTraceFormatter.hex(body)}")
                 onMessage(header, body)
             }
         } catch (error: Exception) {
             failure = error
+            onTrace("VIDEO failed ${Log.getStackTraceString(error)}")
         } finally {
             if (socket === sock) socket = null
             safeClose(sock)
@@ -100,7 +104,10 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                         "head=${payload.hexPrefix(16)}",
                     )
                 }
-                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload, nalLengthSize))
+                onTrace("VIDEO decrypted counter=${frameCounter.get()} payloadHex=${ProtocolTraceFormatter.hex(payload)}")
+                val annexB = ScreenCodec.lengthPrefixedToAnnexB(payload, nalLengthSize)
+                onTrace("VIDEO decoder input nalLengthSize=$nalLengthSize annexBHex=${ProtocolTraceFormatter.hex(annexB)}")
+                listener.onFrame(annexB, ScreenPresentationTime.microseconds(header))
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
@@ -109,6 +116,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                 require(codecData.size > lengthOffset) { "Truncated video configuration" }
                 nalLengthSize = (codecData[lengthOffset].toInt() and 3) + 1
                 require(nalLengthSize != 3) { "Reserved NAL length size" }
+                onTrace("VIDEO config codec=$codec nalLengthSize=$nalLengthSize codecDataHex=${ProtocolTraceFormatter.hex(codecData)}")
                 listener.onCodec(codec)
                 listener.onConfig(codecData)
             }
@@ -121,7 +129,10 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         var offset = 0
         while (offset < length) {
             val read = input.read(output, offset, length - offset)
-            if (read < 0) return null
+            if (read < 0) {
+                if (offset > 0) onTrace("VIDEO incomplete expected=$length received=$offset partialHex=${ProtocolTraceFormatter.hex(output.copyOf(offset))}")
+                return null
+            }
             offset += read
         }
         return output

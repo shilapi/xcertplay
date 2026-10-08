@@ -17,6 +17,8 @@ data class CafMessage(
 data class CafEnvelope(
     val pluginId: Long,
     val message: CafMessage,
+    val encoding: CafPayloadEncoding = CafPayloadEncoding.BINARY_PLIST,
+    val framing: CafPayloadFraming = CafPayloadFraming.COMMAND_PARAMS_DATA,
 )
 
 data class CafRcsFrame(

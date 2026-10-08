@@ -9,6 +9,10 @@ import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import java.io.IOException
 import kotlin.math.min
 
+private fun List<Int>.messageIds(): String = joinToString(prefix = "[", postfix = "]") {
+    "0x${it.toString(16).padStart(4, '0')}"
+}
+
 private fun ByteArray.toHex(): String = joinToString(separator = " ") { "%02x".format(it.toInt() and 0xff) }
 
 /** The wireless transport identity advertised on the Bluetooth identification session. */
@@ -56,6 +60,13 @@ data class Iap2IdentificationConfig(
     /** USB-IF identity used by StartHID; defaults match this app's existing AirPlay HID identity. */
     val hidVendorIdentifier: Int = 2,
     val hidProductIdentifier: Int = 1,
+    /** Additional endpoints backed by the selected authentication provider, frozen before identification. */
+    val authenticationSentMessages: Set<Int> = emptySet(),
+    val authenticationReceivedMessages: Set<Int> = emptySet(),
+    /** Wireless component child 5: a void capability, separate from the optional asset ID. */
+    val supportsThemeAssets: Boolean = false,
+    /** Wireless component child 6, consumed as CarPlay_ThemeAssetIdentifier by accessoryd. */
+    val themeAssetIdentifier: String? = null,
 ) {
     constructor(
         name: String,
@@ -81,6 +92,10 @@ data class Iap2IdentificationConfig(
     )
 
     init {
+        themeAssetIdentifier?.let {
+            require(supportsThemeAssets) { "A theme asset identifier requires theme support" }
+            require(it.isNotBlank() && '\u0000' !in it) { "Theme asset identifier must be a non-empty C string" }
+        }
         listOf(name, modelIdentifier, manufacturer, serialNumber, firmwareVersion, hardwareVersion).forEach {
             require(it.isNotBlank()) { "Identification identity strings must not be blank" }
         }
@@ -111,7 +126,7 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
     class Rejected(parameterIds: Set<Int>, rawBody: ByteArray) : Iap2IdentificationException(
         "iAP2 identification rejected parameters ${parameterIds.sorted().joinToString(prefix = "[", postfix = "]") { "0x${it.toString(16).padStart(4, '0')}" }}; " +
             "raw 0x1d03 body=${rawBody.toHex()}; " +
-            "this minimal identification profile has no optional components to remove",
+            "inspect preceding 0x1d01: param6=MessagesSentByAccessory, param7=MessagesReceivedFromDevice; rejection identifies parameters, not individual message IDs",
     ) {
         val parameterIds: Set<Int> = parameterIds.toSet()
     }
@@ -130,10 +145,16 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
 class Iap2IdentificationClient(private val session: Iap2Session) {
     /** Waits for link negotiation, then completes the 1D00/1D01/1D02 exchange. */
     @Throws(IphoneUsbException::class, Iap2IdentificationException::class)
-    fun identify(config: Iap2IdentificationConfig, timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS) {
+    fun identify(
+        config: Iap2IdentificationConfig,
+        timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        onTrace: (String) -> Unit = {},
+    ) {
         require(timeoutMillis in 1..MAXIMUM_TIMEOUT_MILLIS) {
             "timeoutMillis must be in 1..$MAXIMUM_TIMEOUT_MILLIS"
         }
+        val information = identificationInformation(config)
+        val declared = Iap2BodyReader.of(information)
         val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
         if (!session.awaitReady(remainingMillis(deadlineNanos))) {
             throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 control session readiness")
@@ -143,10 +164,13 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             val frame = session.recv(remainingMillis(deadlineNanos))
                 ?: throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 identification")
             when (frame.messageId) {
-                START_IDENTIFICATION -> session.send(identificationInformation(config), remainingMillis(deadlineNanos))
+                START_IDENTIFICATION -> session.send(information, remainingMillis(deadlineNanos))
                 IDENTIFICATION_ACCEPTED -> return
                 IDENTIFICATION_REJECTED -> {
                     val rejected = Iap2BodyReader.of(frame).list().mapTo(LinkedHashSet()) { it.id }
+                    runCatching { onTrace("TRACE identification rejected parameters=$rejected " +
+                        "MessagesSentByAccessory=${declared.u16List(6).messageIds()} " +
+                        "MessagesReceivedFromDevice=${declared.u16List(7).messageIds()}") }
                     throw Iap2IdentificationException.Rejected(rejected, frame.payload)
                 }
                 else -> throw Iap2IdentificationException.UnexpectedMessage(frame.messageId)
@@ -177,6 +201,13 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             } else {
                 MESSAGES_RECEIVED_FROM_PHONE
             }
+            // accessoryd rejects AE03/AE06 on a wireless endpoint during identification,
+            // even with zero current or a nonzero powerProvidingCapability. Power subscriptions
+            // remain valid; only the USB supply/reset endpoints belong to the wired transport.
+            val declaredSent = (sentMessages.asIterable() + config.authenticationSentMessages)
+                .distinct()
+                .filterNot { wireless != null && it in WIRED_POWER_MESSAGES }
+            val declaredReceived = (receivedMessages.asIterable() + config.authenticationReceivedMessages).distinct()
             return Iap2Messages.build(Iap2Endpoints.IDENTIFICATION_INFORMATION) {
                 string(0, config.name)
                 string(1, config.modelIdentifier)
@@ -187,18 +218,18 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                 u16List(
                     6,
                     if (wireless == null) {
-                        sentMessages.asIterable()
+                        declaredSent
                     } else {
-                        sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray().asIterable() +
+                        declaredSent +
                             ACCESSORY_WIFI_CONFIGURATION_INFORMATION
                     },
                 )
                 u16List(
                     7,
                     if (wireless == null) {
-                        receivedMessages.asIterable()
+                        declaredReceived
                     } else {
-                        receivedMessages.asIterable() + WIRELESS_PHONE_MESSAGES.asIterable()
+                        declaredReceived + WIRELESS_PHONE_MESSAGES.asIterable()
                     },
                 )
                 u8(8, if (wireless == null) 2 else 0)
@@ -244,11 +275,11 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                 if (wireless != null) {
                     group(24) {
                         u16(0, 1)
-                        string(1, wireless.ssid)
+                        string(1, config.name)
                         void(2)
-                        u16(3, 1)
                         void(4)
-                        void(5)
+                        if (config.supportsThemeAssets) void(5)
+                        config.themeAssetIdentifier?.let { string(6, it) }
                     }
                 }
             }
@@ -260,7 +291,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             return min(MAXIMUM_TIMEOUT_MILLIS, (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
         }
 
-        /* Keep this list paired with Iap2WiredControlClient; no stop or AA messages are claimed. */
+        /* Base service endpoints. Authentication declarations come from the selected provider. */
         private val MESSAGES_SENT_BY_ACCESSORY = intArrayOf(
             0x5000, // StartNowPlayingUpdates
             0x5002, // StopNowPlayingUpdates
@@ -273,6 +304,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             0x4154, // StartCallStateUpdates
             0x4156, // StopCallStateUpdates
             0xae03, // PowerSourceUpdate
+            0xae06, // AccessoryResetBaseCurrent
             0x4301, // CarPlayStartSession
             0x6800, // StartHID
             0x6802, // AccessoryHIDReport
@@ -290,7 +322,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             0x4300, // CarPlayAvailability
             0x6801, // DeviceHIDReport (phone→accessory reply required once StartHID is declared)
         )
-        private const val POWER_SOURCE_UPDATE = 0xae03
+        private val WIRED_POWER_MESSAGES = setOf(0xae03, 0xae06)
         private const val ACCESSORY_WIFI_CONFIGURATION_INFORMATION = 0x5703
         private const val LOCATION_INFORMATION = 0xfffb
         private const val START_LOCATION_INFORMATION = 0xfffa

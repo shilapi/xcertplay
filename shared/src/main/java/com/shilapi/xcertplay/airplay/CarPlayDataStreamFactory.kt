@@ -57,6 +57,7 @@ internal class CarPlayDataStreamFactory {
             RcsPayloadStyle.RAW_IAP2 -> CarPlayDataStreamKind.IAP_TUNNEL
             RcsPayloadStyle.CAF_BINARY_PLIST_OPACK,
             RcsPayloadStyle.UI_SYNC_PLIST,
+            RcsPayloadStyle.FILE_TRANSFER_OPACK,
             RcsPayloadStyle.UNCONFIRMED_OPAQUE -> CarPlayDataStreamKind.RCS
         }
 
@@ -68,12 +69,14 @@ internal class CarPlayDataStreamFactory {
         val tunnel = IapTunnel(
             readKey = outputKey,
             bindAddress = bindAddress(session),
+            onTrace = session::logTrace,
         )
         val applicationHandler = handlers.iap
         if (applicationHandler == null) {
             val port = tunnel.listen(
                 object : IapTunnel.Listener {
                     override fun onIap(bytes: ByteArray) = handlers.onIapFallback(bytes)
+                    override fun onDebug(message: String) = session.logTrace(message)
 
                     override fun onClosed(cause: Throwable?) {
                         session.logDebug(

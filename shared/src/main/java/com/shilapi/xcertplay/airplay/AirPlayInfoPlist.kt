@@ -24,17 +24,25 @@ object AirPlayInfoPlist {
     private const val PRIORITY_NICE_TO_HAVE = 100
     private const val CONSTRAINT_ANYTIME = 100
 
-    fun build(config: AirPlayConfig): Map<String, Any?> {
+    /** Null advertises capabilities before SETUP; an empty set means SETUP accepted no features. */
+    fun build(
+        config: AirPlayConfig,
+        negotiatedFeatures: Set<AirPlayFeature>? = null,
+    ): Map<String, Any?> {
         val capabilities = AirPlayFeatureNegotiation.capabilities(
             config = config,
             eventPortAvailable = true,
         )
-        val displays = arrayListOf<Any?>(
-            displayEntry(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
+        val responseFeatures = negotiatedFeatures?.toSet() ?: capabilities.supportedFeatureSet
+        require(capabilities.supportedFeatureSet.containsAll(responseFeatures)) {
+            "/info cannot describe features unsupported by this receiver"
+        }
+        val displays = arrayListOf<Map<String, Any?>>(
+            AirPlayDisplayDescriptionFactory.create(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
         )
-        if (AirPlayFeature.ALT_SCREEN in capabilities.supportedFeatureSet) {
+        if (AirPlayFeature.ALT_SCREEN in responseFeatures) {
             config.ultra?.cluster?.let {
-                displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
+                displays.add(AirPlayDisplayDescriptionFactory.create(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
             }
         }
 
@@ -62,6 +70,19 @@ object AirPlayInfoPlist {
         }
         info["extendedFeatures"] = listOf("vocoderInfo", "enhancedRequestCarUI")
         info["displays"] = displays
+        // DDP is a physical display/plugin relationship, not displays[].features bit 3.
+        // Keep it out of classic and partial negotiations, including an unaccepted alternate stream.
+        if (AirPlayFeature.UI_SYNC in responseFeatures && AirPlayFeature.ALT_SCREEN in responseFeatures) {
+            config.ultra?.clusterDisplayPluginId?.let { pluginId ->
+                info["displayPanels"] = AirPlayDisplayDescriptionFactory.createPanels(
+                    displays.first(), displays[1], pluginId,
+                )
+            }
+        }
+        if (AirPlayFeature.UI_CONTEXT in responseFeatures) {
+            info["uiContextLastOnDisplayURLs"] = emptyList<String>()
+            info["uiContextNowOnDisplayURLs"] = listOfNotNull(config.main.initialUrl, config.ultra?.cluster?.initialUrl)
+        }
         info["hidDevices"] = listOf(
             AirPlayHid.touchHidDevice(config.main.widthPixels, config.main.heightPixels, MAIN_UUID),
             AirPlayHid.knobHidDevice(MAIN_UUID),
@@ -80,7 +101,7 @@ object AirPlayInfoPlist {
                 )
             }
         }
-        capabilities.supportedFeatureSet
+        responseFeatures
             .filter { it.requiresInfoResponseSidecar }
             .forEach { feature ->
                 val key = requireNotNull(feature.infoResponseKey)
@@ -89,7 +110,7 @@ object AirPlayInfoPlist {
                         "AirPlay feature '${feature.wireName}' has no '${feature.infoResponseKey}'",
                     )
             }
-        if (AirPlayFeature.HEVC !in capabilities.supportedFeatureSet) {
+        if (AirPlayFeature.HEVC !in responseFeatures) {
             info.remove("hevcInfo")
         }
         return info
@@ -168,57 +189,4 @@ object AirPlayInfoPlist {
         )
     }
 
-    private fun displayEntry(display: AirPlayDisplayConfig, type: Int, uuid: String): Map<String, Any?> {
-        val widthPhysical = AirPlayDisplaySettings.sanitizeReportedPhysicalMm(
-            display.widthPhysicalMm ?: AirPlayDisplaySettings.DEFAULT_WIDTH_PHYSICAL_MM,
-        )
-        val heightPhysical = AirPlayDisplaySettings.sanitizeReportedPhysicalMm(
-            display.heightPhysicalMm
-                ?: Math.round(
-                    widthPhysical * display.heightPixels.toDouble() / display.widthPixels,
-                ).toInt(),
-        )
-        val fps = AirPlayDisplaySettings.sanitizeFps(display.fps)
-
-        val entry = linkedMapOf<String, Any?>(
-            "uuid" to uuid,
-            "type" to type,
-            "maxFPS" to fps,
-            "widthPixels" to display.widthPixels,
-            "heightPixels" to display.heightPixels,
-            "widthPhysical" to widthPhysical,
-            "heightPhysical" to heightPhysical,
-            "features" to (DISPLAY_FEATURE_HIGH_FIDELITY_TOUCH or DISPLAY_FEATURE_KNOBS),
-            "primaryInputDevice" to display.primaryInputDevice,
-        )
-
-        entry["viewAreas"] = listOf(areaDict(display))
-        entry["initialViewArea"] = 0
-        if (display.initialUrl != null) entry["initialURL"] = display.initialUrl
-        return entry
-    }
-
-    private fun areaDict(display: AirPlayDisplayConfig): Map<String, Any?> {
-        // The session SETUP response enables "viewAreas", so /info must always describe one.
-        // A display without custom insets uses the full panel for both the view and safe areas.
-        val view = display.viewArea ?: AirPlayInsets()
-        val width = display.widthPixels
-        val height = display.heightPixels
-        val result = linkedMapOf<String, Any?>(
-            "widthPixels" to (width - view.left - view.right),
-            "heightPixels" to (height - view.top - view.bottom),
-            "originXPixels" to view.left,
-            "originYPixels" to view.top,
-        )
-        val safe = display.safeArea ?: AirPlayInsets()
-        val safeArea = linkedMapOf<String, Any?>(
-            "widthPixels" to (width - safe.left - safe.right),
-            "heightPixels" to (height - safe.top - safe.bottom),
-            "originXPixels" to safe.left,
-            "originYPixels" to safe.top,
-            "drawUIOutsideSafeArea" to (display.safeAreaDrawOutside ?: true),
-        )
-        result["safeArea"] = safeArea
-        return result
-    }
 }

@@ -10,6 +10,7 @@ import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
  * to infer direction from a generic message handler.
  */
 interface CafPluginHandler {
+    fun onSessionClosed(session: CafProtocolSession) {}
     fun onTransactionCompleted(
         session: CafProtocolSession,
         transaction: CafPendingTransaction,

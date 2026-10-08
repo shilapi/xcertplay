@@ -9,9 +9,46 @@ class Iap2MfiAuthenticationClient(
     private val authentication: MfiAuthenticator,
     private val maximumCertificateLength: Int = MfiAuthenticationClient.DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
 ) {
+    private val ultraSent = authentication.mfi4SentMessages.toSet()
+    private val ultraReceived = authentication.mfi4ReceivedMessages.toSet()
     init {
+        require((ultraSent + ultraReceived).all { it in 0..0xffff }) { "Authentication endpoint IDs must fit u16" }
         require(maximumCertificateLength in 1..MAX_CSM_CERTIFICATE_BYTES) {
             "maximumCertificateLength must be in 1..$MAX_CSM_CERTIFICATE_BYTES"
+        }
+    }
+
+    // AA00–AA06 use the fixed pre-identification authentication whitelist (audit §2.7).
+    // Capability lists declare negotiated service endpoints, not every frame this client sends.
+    fun identification(config: com.shilapi.xcertplay.transport.Iap2IdentificationConfig) = config.copy(
+        authenticationSentMessages = ultraSent,
+        authenticationReceivedMessages = ultraReceived,
+    )
+
+    fun supportsUltra(messageId: Int) = messageId in ultraReceived
+
+    fun validateUltraReply(frame: Iap2Frame) = validateUltraFrame(frame, ultraSent, "reply", 0)
+    fun validateUltraIncoming(frame: Iap2Frame) = validateUltraFrame(frame, ultraReceived, "incoming", 0)
+
+    private fun validateUltraFrame(frame: Iap2Frame, declared: Set<Int>, direction: String, depth: Int) {
+        require(depth in 0..3) { "MFi4 $direction nesting exceeds limit" }
+        require(frame.messageId in declared) { "MFi4 $direction endpoint not declared: 0x${frame.messageId.toString(16)}" }
+        val reader = com.shilapi.xcertplay.iap2.message.Iap2Messages.reader(frame)
+        when (frame.messageId) {
+            0x5164 -> validateUltraFrame(com.shilapi.xcertplay.iap2.message.Iap2UltraMessages.nestedFrame(reader.bytes(0)), declared, direction, depth + 1)
+            0x5500, 0x5501 -> validateUltraFrame(com.shilapi.xcertplay.iap2.message.Iap2UltraMessages.nestedFrame(reader.bytes(1)), declared, direction, depth + 1)
+        }
+    }
+
+    /** Shared handler for direct and tunneled MFi4. Unknown response layouts fail explicitly. */
+    fun handleUltra(frame: Iap2Frame, onProgress: (String) -> Unit = {}): Iap2Frame? {
+        require(supportsUltra(frame.messageId)) { "MFi4 endpoint was not declared: ${frame.messageId}" }
+        onProgress("MFi4 incoming id=0x${frame.messageId.toString(16)} bytes=${frame.payload.size}")
+        return when (frame.messageId) {
+            0x51ff -> { onProgress("MFi4 phone authentication-succeeded"); null }
+            else -> authentication.mfi4Exchange(frame).also {
+                onProgress("MFi4 provider response=${it?.messageId?.toString(16) ?: "pending"}")
+            }
         }
     }
 
@@ -36,11 +73,20 @@ class Iap2MfiAuthenticationClient(
                 "certificate loaded bytes=${certificate.size} " +
                 "payload bytes=$certificatePayloadBytes",
         )
+        var ultraSucceeded = false
+        val relay = com.shilapi.xcertplay.iap2.message.Iap2UltraRelaySession(
+            respond = { validateUltraReply(it); send(session, it, deadlineNanos) },
+            authenticate = { frame -> if (frame.messageId == 0x51ff) ultraSucceeded = true; handleUltra(frame, onProgress) },
+            trace = { onProgress("TRACE $it") })
         while (true) {
             val remaining = remainingMillis(deadlineNanos)
             if (remaining == 0L) throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
             val frame = session.recv(remaining)
                 ?: throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
+            if (supportsUltra(frame.messageId)) {
+                validateUltraIncoming(frame)
+                if (relay.handle(frame)) { if (ultraSucceeded) return; continue }
+            }
             when (frame.messageId) {
                 REQUEST_CERTIFICATE -> {
                     onProgress("iap2 mfi rx=0xaa00 request-certificate")

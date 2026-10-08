@@ -4,17 +4,18 @@ import com.shilapi.xcertplay.airplay.BplistCodec
 import com.shilapi.xcertplay.airplay.rcs.RcsMessage
 import com.shilapi.xcertplay.airplay.rcs.opack.OpackCodec
 
-/**
- * CAF carrier codec.
- *
- * RCS body:
- * `bplist({"params":{"data": outerOpack}})`
- *
- * Outer OPACK:
- * `{"pluginID": NSNumber, "pluginData": NSData(innerOpack)}`
- */
+/** Blob encoding is independent of the RCS body framing. */
+enum class CafPayloadEncoding { BINARY_PLIST, LEGACY_OPACK }
+
+/** Direct comm bodies are observed on the wire; command wrappers remain supported. */
+enum class CafPayloadFraming { DIRECT, COMMAND_PARAMS_DATA }
+
 object CafRcsCodec {
-    fun encode(envelope: CafEnvelope): CafRcsFrame {
+    fun encode(
+        envelope: CafEnvelope,
+        encoding: CafPayloadEncoding = envelope.encoding,
+        framing: CafPayloadFraming = envelope.framing,
+    ): CafRcsFrame {
         envelope.message.validateWireShape()
         if (envelope.pluginId < 0) {
             throw CafProtocolException("pluginId must not be negative")
@@ -29,28 +30,45 @@ object CafRcsCodec {
 
         val outer = linkedMapOf<String, Any?>(
             "pluginID" to envelope.pluginId,
-            "pluginData" to OpackCodec.encode(inner),
+            "pluginData" to encodeBlob(inner, encoding),
         )
-        val body = BplistCodec.encode(
-            linkedMapOf(
-                "params" to linkedMapOf(
-                    "data" to OpackCodec.encode(outer),
+        val outerBytes = encodeBlob(outer, encoding)
+        val body = when (framing) {
+            CafPayloadFraming.DIRECT -> outerBytes
+            CafPayloadFraming.COMMAND_PARAMS_DATA -> BplistCodec.encode(
+                linkedMapOf(
+                    "params" to linkedMapOf("data" to outerBytes),
                 ),
-            ),
-        )
-        return CafRcsFrame(envelope, body)
+            )
+        }
+        return CafRcsFrame(envelope.copy(encoding = encoding, framing = framing), body)
     }
 
     fun decode(rcsBody: ByteArray): CafEnvelope {
-        val wrapper = requireMap(BplistCodec.decode(rcsBody), "RCS body")
-        val params = requireMap(wrapper["params"], "RCS body params")
-        val outerBytes = params["data"] as? ByteArray
-            ?: throw CafProtocolException("RCS body params.data must be NSData")
-        val outer = requireMap(OpackCodec.decode(outerBytes), "CAF outer OPACK")
+        val body = requireMap(decodeBlob(rcsBody), "RCS body")
+        val framing = if (body.containsKey("params")) {
+            if (body.containsKey("pluginID") || body.containsKey("pluginData")) {
+                throw CafProtocolException("RCS body has conflicting CAF framings")
+            }
+            CafPayloadFraming.COMMAND_PARAMS_DATA
+        } else {
+            CafPayloadFraming.DIRECT
+        }
+        val outerBytes = when (framing) {
+            CafPayloadFraming.DIRECT -> rcsBody
+            CafPayloadFraming.COMMAND_PARAMS_DATA -> {
+                val params = requireMap(body["params"], "RCS body params")
+                params["data"] as? ByteArray
+                    ?: throw CafProtocolException("RCS body params.data must be NSData")
+            }
+        }
+        val outer = if (framing == CafPayloadFraming.DIRECT) body
+            else requireMap(decodeBlob(outerBytes), "CAF outer blob")
         val pluginId = CafNumbers.toLong(outer["pluginID"], "CAF pluginID")
+        if (pluginId < 0) throw CafProtocolException("pluginId must not be negative")
         val innerBytes = outer["pluginData"] as? ByteArray
             ?: throw CafProtocolException("CAF outer pluginData must be NSData")
-        val inner = requireMap(OpackCodec.decode(innerBytes), "CAF inner OPACK")
+        val inner = requireMap(decodeBlob(innerBytes), "CAF inner blob")
         val commandName = inner["command"] as? String
             ?: throw CafProtocolException("CAF inner command must be a string")
         val command = CafCommand.find(commandName)
@@ -72,8 +90,24 @@ object CafRcsCodec {
             error = error,
         )
         message.validateWireShape()
-        return CafEnvelope(pluginId, message)
+        return CafEnvelope(
+            pluginId,
+            message,
+            if (isPlist(outerBytes)) CafPayloadEncoding.BINARY_PLIST else CafPayloadEncoding.LEGACY_OPACK,
+            framing,
+        )
     }
+
+    private fun isPlist(bytes: ByteArray): Boolean =
+        bytes.size >= 8 && bytes.copyOfRange(0, 8).contentEquals("bplist00".toByteArray(Charsets.US_ASCII))
+
+    private fun encodeBlob(value: Any?, encoding: CafPayloadEncoding): ByteArray = when (encoding) {
+        CafPayloadEncoding.BINARY_PLIST -> BplistCodec.encode(value)
+        CafPayloadEncoding.LEGACY_OPACK -> OpackCodec.encode(value)
+    }
+
+    private fun decodeBlob(bytes: ByteArray): Any? =
+        if (isPlist(bytes)) BplistCodec.decode(bytes) else OpackCodec.decode(bytes)
 
     @Suppress("UNCHECKED_CAST")
     private fun requireMap(value: Any?, label: String): Map<Any?, Any?> =

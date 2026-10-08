@@ -23,6 +23,8 @@ class CafProtocolSession(
     private val plugins: CafPluginRegistry,
     private val decoderFactory: CafConfigTreeDecoderFactory,
     val transactions: CafTransactionTracker = CafTransactionTracker(),
+    private var encoding: CafPayloadEncoding = CafPayloadEncoding.BINARY_PLIST,
+    private var framing: CafPayloadFraming = CafPayloadFraming.COMMAND_PARAMS_DATA,
 ) : RcsDataStreamHandler, Closeable {
     init {
         require(clientType.payloadStyle == RcsPayloadStyle.CAF_BINARY_PLIST_OPACK) {
@@ -34,8 +36,9 @@ class CafProtocolSession(
     }
 
     fun send(frame: CafRcsFrame) {
-        traceFrame("TX", frame.envelope, frame.rcsBody)
-        stream.send(frame.asRcsMessage())
+        val encoded = CafRcsCodec.encode(frame.envelope, encoding, framing)
+        traceFrame("TX", encoded.envelope, encoded.rcsBody)
+        stream.send(encoded.asRcsMessage())
     }
 
     fun requestConfig(pluginId: Long): CafPendingTransaction {
@@ -130,6 +133,8 @@ class CafProtocolSession(
             )
         }
         val reader = CarAccessoryMessages.reader(message.body)
+        encoding = reader.envelope.encoding
+        framing = reader.envelope.framing
         traceFrame("RX", reader.envelope, message.body)
         plugins.requireRegistration(reader.pluginId).also { registration ->
             if (clientType !in registration.clientTypes) {
@@ -147,6 +152,10 @@ class CafProtocolSession(
         )
     }
 
+    override fun onStreamClosed(stream: RcsDataStream, cause: Throwable?) {
+        plugins.registrationsFor(clientType).forEach { it.handler.onSessionClosed(this) }
+    }
+
     override fun close() {
         stream.close()
     }
@@ -158,7 +167,7 @@ class CafProtocolSession(
     ) {
         val message = envelope.message
         stream.traceProtocol(
-            "CAF $direction pluginID=${envelope.pluginId} " +
+            "CAF $direction encoding=${envelope.encoding} framing=${envelope.framing} pluginID=${envelope.pluginId} " +
                 "command=${message.command.wireName} " +
                 "transactionID=${message.transactionId ?: "none"} " +
                 "values=${ProtocolTraceFormatter.pretty(message.values)} " +
