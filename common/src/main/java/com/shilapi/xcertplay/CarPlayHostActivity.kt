@@ -306,6 +306,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hevcSoftwareDecoderEnabled = false
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
+    private var audioFocusEnabled = true
+    private var audioFocusAutoYield = true
     private var mainMediaAudioBufferDurationMs = MainMediaAudioBuffer.DEFAULT_DURATION_MS
     @Volatile private var debugLogsEnabled = false
     private var mediaMetricsEnabled = false
@@ -490,6 +492,8 @@ class CarPlayHostActivity : ComponentActivity() {
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
+        audioFocusEnabled = AirPlayPersistence.loadAudioFocusEnabled(this)
+        audioFocusAutoYield = AirPlayPersistence.loadAudioFocusAutoYield(this)
         mainMediaAudioBufferDurationMs =
             AirPlayPersistence.loadMainMediaAudioBufferDurationMs(this)
         microphoneGainPercent = AirPlayPersistence.loadMicrophoneGainPercent(this)
@@ -994,6 +998,43 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
         content.addView(
+            settingsSwitchRow(
+                label = "Audio focus",
+                checked = audioFocusEnabled,
+                description = "Claim Android audio focus for CarPlay media; duck on prompts and mute on interruptions",
+            ) { checked ->
+                audioFocusEnabled = checked
+                appendLog(
+                    "Audio focus ${if (checked) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(20) },
+        )
+        content.addView(
+            settingsSwitchRow(
+                label = "Mute media on temporary focus loss",
+                checked = audioFocusAutoYield,
+                description = "Mute CarPlay music during temporary Android audio interruptions such as Bluetooth phone calls",
+            ) { checked ->
+                audioFocusAutoYield = checked
+                appendLog(
+                    "Audio focus auto-yield ${if (checked) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+
+        content.addView(
             settingsCategoryHeader("Identity & appearance"),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1481,6 +1522,8 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveLocationReportingEnabled(this, locationReportingEnabled)
         AirPlayPersistence.saveAutoStartOnBoot(this, autoStartOnBoot)
         AirPlayPersistence.saveAdvancedAudioChannelMapping(this, advancedAudioChannelMapping)
+        AirPlayPersistence.saveAudioFocusEnabled(this, audioFocusEnabled)
+        AirPlayPersistence.saveAudioFocusAutoYield(this, audioFocusAutoYield)
         AirPlayPersistence.saveMainMediaAudioBufferDurationMs(
             this,
             mainMediaAudioBufferDurationMs,
@@ -3132,6 +3175,15 @@ class CarPlayHostActivity : ComponentActivity() {
                     .append(if (advancedAudioChannelMapping) "AAOS buses" else "Mobile compatible")
                     .append('\n')
             }
+            append("Audio focus: ")
+                .append(
+                    if (audioFocusEnabled) {
+                        if (audioFocusAutoYield) "enabled (auto-yield)" else "enabled"
+                    } else {
+                        "disabled"
+                    },
+                )
+                .append('\n')
             append(safeAreaSummary())
         }
     }
@@ -3337,6 +3389,8 @@ class CarPlayHostActivity : ComponentActivity() {
         onScreenStreamActiveChanged = { type, active ->
             onScreenStreamStateChanged(controllerGeneration, type, active)
         },
+        audioFocusEnabled = audioFocusEnabled,
+        audioFocusAutoYield = audioFocusAutoYield,
     )
 
     private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
