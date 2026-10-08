@@ -93,6 +93,9 @@ class CarPlayVpnService : VpnService() {
                 .setSession(SESSION_NAME)
                 .setMtu(TUN_MTU)
                 .setBlocking(true)
+                // An empty app list routes every UID through this VPN. Scope it before establish;
+                // rejection must reach the existing attachment cleanup, never an unscoped retry.
+                .addAllowedApplication(packageName)
                 .establish()
                 ?: throw IOException("VpnService.establish returned null")
             tun = tunFd
