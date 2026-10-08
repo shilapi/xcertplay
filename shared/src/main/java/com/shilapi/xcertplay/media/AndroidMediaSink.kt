@@ -39,6 +39,8 @@ class AndroidMediaSink(
     private val microphoneGainPercent: Int = MicrophoneGain.DEFAULT_PERCENT,
     mediaMetricsMonitor: MediaMetricsMonitor? = null,
     onScreenStreamActiveChanged: ((Int, Boolean) -> Unit)? = null,
+    private val audioFocusEnabled: Boolean = true,
+    private val audioFocusAutoYield: Boolean = true,
 ) : MediaSink {
     private val defaultSurface = surface
     @Volatile private var screenStreamActiveChanged = onScreenStreamActiveChanged
@@ -49,6 +51,15 @@ class AndroidMediaSink(
     private val videoRecoveryHandlers = ConcurrentHashMap<Int, () -> Boolean>()
     private val pendingVideoCodec = ConcurrentHashMap<Int, VideoCodec>()
     @Volatile private var mediaMetricsMonitor = mediaMetricsMonitor
+    private val audioFocusCoordinator = AudioFocusCoordinator(
+        context = context,
+        enabled = audioFocusEnabled,
+        muteMediaOnTransientLoss = audioFocusAutoYield,
+    )
+
+    fun onMediaAudioFocusChanged(change: Int) {
+        audioFocusCoordinator.onExternalFocusChange(change)
+    }
 
     fun setSurface(type: Int, surface: Surface) {
         surfaces[type] = surface
@@ -125,6 +136,7 @@ class AndroidMediaSink(
         videoDecoders.clear()
         videoRecoveryHandlers.clear()
         pendingVideoCodec.clear()
+        audioFocusCoordinator.close()
         audioRenderers.values.forEach(AudioRenderer::close)
         audioRenderers.clear()
         microphoneUplinks.values.forEach(MicrophoneUplink::close)
@@ -153,6 +165,7 @@ class AndroidMediaSink(
             advancedAudioChannelMapping,
             mainMediaAudioBufferDurationMs,
             mediaMetricsMonitor,
+            audioFocusCoordinator,
         ).also {
             audioRenderers[type] = it
         }
@@ -543,6 +556,7 @@ private class AudioRenderer(
     private val advancedAudioChannelMapping: Boolean,
     private val mainMediaAudioBufferDurationMs: Int,
     mediaMetricsMonitor: MediaMetricsMonitor?,
+    private val audioFocusCoordinator: AudioFocusCoordinator? = null,
 ) : Closeable {
     private data class AudioPacket(val rtp: ByteArray, val sample: Int)
 
@@ -683,8 +697,9 @@ private class AudioRenderer(
         } else {
             maxOf(minBuffer, MIN_START_BUFFER_BYTES)
         }
-        track = AudioTrack.Builder()
-            .setAudioAttributes(audioAttributes())
+        val attributes = audioAttributes()
+        val nextTrack = AudioTrack.Builder()
+            .setAudioAttributes(attributes)
             .setAudioFormat(
                 AndroidAudioFormat.Builder()
                     .setEncoding(encoding)
@@ -695,6 +710,17 @@ private class AudioRenderer(
             .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+        track = nextTrack
+        val selection = AudioChannelMapper.map(
+            audioType = format.audioType,
+            payloadType = format.payloadType,
+            mode = if (advancedAudioChannelMapping) {
+                AudioChannelMappingMode.AUTOMOTIVE_BUS
+            } else {
+                AudioChannelMappingMode.MOBILE_COMPATIBLE
+            },
+        )
+        audioFocusCoordinator?.acquire(nextTrack, selection.channel, attributes)
         // AudioTrack consumes 16-bit PCM, so frame size follows the channel mask configured above.
         trackBytesPerFrame = trackChannelCount * BYTES_PER_PCM_16_SAMPLE
         Log.i(
@@ -1032,6 +1058,7 @@ private class AudioRenderer(
         val track = track
         this.track = null
         if (track != null) {
+            audioFocusCoordinator?.release(track)
             try {
                 track.pause()
             } catch (_: Exception) {
