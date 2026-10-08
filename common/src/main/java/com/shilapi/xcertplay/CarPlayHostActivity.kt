@@ -641,6 +641,15 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        applyFullscreenMode()
+        videoView?.post {
+            val view = videoView ?: return@post
+            scheduleDisplaySize(view.width, view.height)
+        }
+    }
+
     override fun onDestroy() {
         stopMicrophoneGainTest()
         mainHandler.removeCallbacks(applyDisplaySize)
@@ -3097,6 +3106,9 @@ class CarPlayHostActivity : ComponentActivity() {
             append(if (hideTopBar) "top hidden" else "top shown")
             append(", ")
             append(if (hideBottomBar) "bottom hidden" else "bottom shown")
+            if (isInMultiWindowMode) {
+                append(" (multi-window)")
+            }
         }
         resolutionPreviewView?.text = buildString {
             append(resolution).append('\n')
@@ -4035,8 +4047,9 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun applyFullscreenMode() {
-        val hideTop = hideTopBar
-        val hideBottom = hideBottomBar
+        val inMultiWindow = isInMultiWindowMode
+        val hideTop = hideTopBar && !inMultiWindow
+        val hideBottom = hideBottomBar && !inMultiWindow
         WindowCompat.setDecorFitsSystemWindows(window, !(hideTop && hideBottom))
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (hideTop) {
