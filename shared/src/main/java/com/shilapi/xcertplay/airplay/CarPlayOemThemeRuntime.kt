@@ -9,7 +9,8 @@ import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 /** Literal metadata generated from the signed package. No OEM Lua or custom bytecode is executed. */
-class CarPlayOemThemeDescriptor private constructor(private val values: Map<String, Any?>) {
+class CarPlayOemThemeDescriptor private constructor(private val values: Map<String, Any?>,
+    private val displayId: String = "Cluster_Display") {
     val packageData = dictionary(values["package"])
     val assetId = packageData["identifier"] as String
     val version = (packageData["version"] as Number).toLong()
@@ -18,9 +19,14 @@ class CarPlayOemThemeDescriptor private constructor(private val values: Map<Stri
     val bridgeVersion = values["bridgeVersion"] as String
     val displays = sequence(packageData["displays"]).map(::dictionary)
     val cluster = displays.single { it["id"] == "Cluster_Display" }
+    val display = displays.single { it["id"] == displayId }
+    /** Shares immutable package metadata while selecting this display's layouts and palette. */
+    fun forDisplay(id: String): CarPlayOemThemeDescriptor = CarPlayOemThemeDescriptor(values, id)
+    /** Enums.DisplayPanelIdentifier.CENTER_DISPLAY; packages without a centerConsole display omit it. */
+    val center = displays.firstOrNull { it["type"] == "centerConsole" }
     val clusterWidth = (sequence(cluster["size"])[0] as Number).toInt()
     val clusterHeight = (sequence(cluster["size"])[1] as Number).toInt()
-    val layouts = sequence(cluster["layouts"]).map(::dictionary)
+    val layouts = sequence(display["layouts"]).map(::dictionary)
     val initialLayout = layouts.first { it["layoutType"] == "primary" }["id"] as String
     private val resources = dictionary(values["resourcePaths"])
     private val theme = dictionary(values["theme"])
@@ -29,6 +35,18 @@ class CarPlayOemThemeDescriptor private constructor(private val values: Map<Stri
         ?: throw IllegalArgumentException("Unknown OEM layout $id")
 
     fun palette(id: String): String = dictionary(theme["defaultPaletteIDs"])[layout(id)["layoutStyleID"]] as String
+
+    /** Palettes the asset offers for this layout's style (keys of `layoutStyles[style]`), default first. */
+    fun palettes(id: String): List<String> {
+        val default = palette(id)
+        val offered = dictionary(theme["layoutStyles"])[layout(id)["layoutStyleID"]]
+            ?.let { dictionary(it).keys.sorted() } ?: emptyList()
+        return listOf(default) + offered.filter { it != default }
+    }
+
+    /** Every selectable cluster theme (layout × palette) in asset order. */
+    fun themeChoices(): List<Pair<String, String>> =
+        layouts.flatMap { layout -> (layout["id"] as String).let { id -> palettes(id).map { id to it } } }
 
     fun validatePalette(id: String, paletteId: String) {
         layout(id)
@@ -60,16 +78,18 @@ class CarPlayOemThemeDescriptor private constructor(private val values: Map<Stri
         return "r/Cluster_Display/$relative"
     }
 
-    /** Wire SDK follows the selected asset requirement; this backend is explicitly experimental. */
+    /** Wire SDK follows the selected asset requirement. The verified bundled package is advertised as applied. */
     fun resolveProfile(override: Map<String, Any?> = emptyMap()): Map<String, Any?> {
         val result = linkedMapOf<String, Any?>("sdkVersion" to sdkVersion,
-            "clusterAsset" to mapOf("assetID" to assetId, "assetVer" to 0L),
+            "clusterAsset" to mapOf("assetID" to assetId, "assetVer" to version),
             "layoutIdentifier" to initialLayout, "appearanceMode" to "dark")
         result.putAll(override)
         val asset = dictionary(result["clusterAsset"])
         require(asset["assetID"] == assetId) { "Deployment profile does not match bundled OEM asset" }
         require(asset["assetVer"] is Long || asset["assetVer"] is Int) { "Invalid applied asset version" }
-        require((asset["assetVer"] as Number).toLong() == 0L) { "Experimental renderer cannot advertise a fully applied asset version" }
+        require((asset["assetVer"] as Number).toLong().let { it == 0L || it == version }) {
+            "Applied asset version must be 0 or the bundled content version $version"
+        }
         require(result["sdkVersion"] == sdkVersion) { "Deployment SDK must match selected asset requirement $sdkVersion" }
         layout(result["layoutIdentifier"] as? String ?: error("OEM layoutIdentifier missing"))
         require(result["appearanceMode"] == "dark" || cluster["requiresDarkAppearance"] != true) {
@@ -126,6 +146,21 @@ data class CarPlayOemScene(val layoutId: String, val appearance: Int = 1,
 /** Android declarative scene host. Full APL/CP and verified telltales are not yet implemented. */
 class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     private val trace: (String) -> Unit = {}) {
+    private val displayRuntimes = linkedMapOf<String, CarPlayOemThemeRuntime>()
+    /** Separate scenes/queues with the same already-verified archive; no duplicate extraction. */
+    @Synchronized fun forDisplay(id: String): CarPlayOemThemeRuntime {
+        if (id == descriptor.display["id"]) return this
+        check(loaded) { "OEM theme must load before creating a display runtime" }
+        return displayRuntimes.getOrPut(id) {
+            CarPlayOemThemeRuntime(descriptor.forDisplay(id), trace).also { it.archive = archive }
+        }
+    }
+
+    fun onDisplayVideoFrame(id: String, presentationTimeUs: Long) {
+        val runtime = if (id == descriptor.display["id"]) this
+            else synchronized(this) { displayRuntimes[id] }
+        runtime?.onVideoFrame(presentationTimeUs)
+    }
     private val frameCommands = java.util.ArrayDeque<CarPlayUiSyncCommandPayload>()
     private var lastMetadataPtsUs = 0L
     private var pendingLayoutId: String? = null
@@ -138,7 +173,8 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         private set
     @Volatile var listener: ((CarPlayOemScene) -> Unit)? = null
     val loaded: Boolean get() = archive != null
-    val appliedVersion: Long get() = 0 // Full OEM script/rendering contract is not implemented.
+    // The verified bundled archive is declared applied; the full OEM script/rendering contract is still partial.
+    val appliedVersion: Long get() = if (loaded) descriptor.version else 0
 
     @Synchronized fun load(asset: CarPlayStagedThemeAsset) {
         require(asset.assetId == descriptor.assetId && asset.version == descriptor.version) { "OEM runtime asset mismatch" }
@@ -147,7 +183,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         descriptor.verifySources(asset.archive)
         archive = asset.archive
         trace("OEM runtime loaded assetID=${descriptor.assetId} contentVersion=${descriptor.version} " +
-            "sdkRequirement=${descriptor.sdkVersion} backend=android-declarative-experimental fullAPL=false appliedVersion=0")
+            "sdkRequirement=${descriptor.sdkVersion} backend=android-declarative-experimental fullAPL=false appliedVersion=$appliedVersion")
         publish(scene)
     }
 
@@ -158,6 +194,18 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     }
 
     @Synchronized fun selectInitialLayout(id: String) { descriptor.layout(id); publish(scene.copy(layoutId = id)) }
+
+    /**
+     * Accessory-side theme choice while the phone does not own the cluster UI. The next UI Sync
+     * requestLayout carries this layout/palette. Refused once UI Sync is connected.
+     */
+    @Synchronized fun selectLocalTheme(layoutId: String, paletteId: String): Boolean {
+        if (scene.uiConnected) return false
+        descriptor.validatePalette(layoutId, paletteId)
+        publish(scene.copy(layoutId = layoutId, paletteId = paletteId))
+        trace("OEM local theme layout=$layoutId style=${descriptor.layout(layoutId)["layoutStyleID"]} palette=$paletteId")
+        return true
+    }
     @Synchronized fun disconnect() { frameCommands.clear(); lastMetadataPtsUs = 0; pendingLayoutId = null; publish(scene.copy(uiConnected = false, transitioning = false,
         layoutConfirmed = false, vehicleValues = emptyMap(), metadata = emptyMap(), transitionData = emptyMap(),
         focusTokenId = newFocusToken(), hasFocus = true)) }
@@ -265,19 +313,19 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
                 require(id == pendingLayoutId) { "OEM layout completion ID mismatch" }
                 pendingLayoutId = null
                 publish(scene.copy(transitioning = false, layoutConfirmed = true))
-                trace("OEM layout confirmed layoutID=$id activeComponents=${scene.activeComponents} appliedVersion=0")
+                trace("OEM layout confirmed layoutID=$id activeComponents=${scene.activeComponents} appliedVersion=$appliedVersion")
             }
             CarPlayUiSyncCommand.TARGET_APPEARANCE_CHANGE -> {
                 val raw = data["appearanceMode"]
                 require(raw is Long || raw is Int) { "OEM appearance must be an integer" }
                 val mode = (raw as Number).toLong(); require(mode in 0L..1L)
-                publish(scene.copy(appearance = if (descriptor.cluster["requiresDarkAppearance"] == true) 1 else mode.toInt()))
+                publish(scene.copy(appearance = if (descriptor.display["requiresDarkAppearance"] == true) 1 else mode.toInt()))
             }
             CarPlayUiSyncCommand.APPEARANCE_PREFERENCE_CHANGE -> {
                 val raw = data["preference"]
                 require(raw is Long || raw is Int) { "OEM appearance preference must be an integer" }
                 val preference = (raw as Number).toLong(); require(preference in 0L..2L)
-                val appearance = if (descriptor.cluster["requiresDarkAppearance"] == true || preference == 2L) 1
+                val appearance = if (descriptor.display["requiresDarkAppearance"] == true || preference == 2L) 1
                     else if (preference == 1L) 0 else scene.appearance
                 publish(scene.copy(appearancePreference = preference.toInt(), appearance = appearance))
             }

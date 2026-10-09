@@ -22,7 +22,7 @@ class CarPlayUiSyncAssetContractTest {
         val output = mutableListOf<CarPlayUiSyncMessage>()
         val session = CarPlayUiSyncSession("vehicle", output::add, expectedRemoteIdentifier = "paired-phone")
         session.start()
-        assertEquals(2L, session.version.wireValue)
+        assertEquals(3L, session.version.wireValue)
         assertEquals("paired-phone", output.single().toWireMap()["id"])
         assertFalse(output.single().toWireMap().containsKey("vehicleID"))
         val complete = CarPlayUiSyncMessageFactory.resetComplete(1, 1, 1, version = CarPlayUiSyncProtocolVersion.V3)
@@ -30,20 +30,29 @@ class CarPlayUiSyncAssetContractTest {
         assertEquals(CarPlayUiSyncSessionState.AWAITING_RESET_SELF_INITIATED, session.state)
         session.receive(complete.copy(remoteIdentifier = "paired-phone"))
         assertEquals(CarPlayUiSyncSessionState.READY, session.state)
-        assertEquals(CarPlayUiSyncProtocolVersion.V2, session.version)
+        assertEquals(CarPlayUiSyncProtocolVersion.V3, session.version)
         assertEquals("paired-phone", output.last().remoteIdentifier)
     }
 
-    @Test fun simultaneousInitialResetIsIgnoredAndLaterResetStartsOurNewSession() {
+    @Test fun simultaneousInitialResetIsAnsweredAndLaterResetIsAnsweredAgain() {
         val output = mutableListOf<CarPlayUiSyncMessage>()
         val session = CarPlayUiSyncSession("vehicle", output::add)
         session.start()
         session.receive(CarPlayUiSyncMessageFactory.reset(99, 1, 0, version = CarPlayUiSyncProtocolVersion.V2))
-        assertEquals(1, output.size)
-        session.receive(CarPlayUiSyncMessageFactory.resetComplete(1, 1, 1, version = CarPlayUiSyncProtocolVersion.V2))
-        session.receive(CarPlayUiSyncMessageFactory.reset(99, 1, 0, version = CarPlayUiSyncProtocolVersion.V2))
-        assertEquals(2L, output.last().sessionSequenceNumber)
-        assertEquals(CarPlayUiSyncSessionState.AWAITING_RESET_SELF_INITIATED, session.state)
+        assertEquals(2, output.size)
+        val answer = output.last()
+        assertEquals(CarPlayUiSyncMessageType.RESET_COMPLETE, answer.type)
+        assertEquals(99L, answer.sessionSequenceNumber)
+        assertEquals(1L, answer.acknowledgementSequenceNumber)
+        assertEquals(CarPlayUiSyncProtocolVersion.V2, answer.version)
+        assertEquals(CarPlayUiSyncSessionState.AWAITING_RESET_COMPLETE_REMOTE_INITIATED, session.state)
+        session.receive(CarPlayUiSyncMessageFactory.resetComplete(99, 2, 1, version = CarPlayUiSyncProtocolVersion.V2))
+        assertEquals(CarPlayUiSyncSessionState.READY, session.state)
+        assertEquals(2, output.size)
+        session.receive(CarPlayUiSyncMessageFactory.reset(100, 1, 0, version = CarPlayUiSyncProtocolVersion.V2))
+        assertEquals(CarPlayUiSyncMessageType.RESET_COMPLETE, output.last().type)
+        assertEquals(100L, output.last().sessionSequenceNumber)
+        assertEquals(CarPlayUiSyncSessionState.AWAITING_RESET_COMPLETE_REMOTE_INITIATED, session.state)
     }
 
     @Test fun numericResetAndAbsentNoAckDecodeAsTheAssetProtocol() {

@@ -25,6 +25,7 @@ import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.Log
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -111,6 +112,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private lateinit var airPlayIdentity: AirPlayIdentity
 
     private val altScreenConfig = CarPlayAltScreenConfig.DEFAULT
+
+    // Null keeps the main stream equal to the host pane; Ultra pins it and letterboxes the pane.
+    private var mainStreamConfig: CarPlayAltScreenConfig? = null
 
     // CH341 USB\VID_1A86&PID_5512&REV_0304 is the deployment-supplied bridge identity.
     private fun createRuntimeConfig(): CarPlayRuntimeConfig = CarPlayRuntimeConfig(
@@ -258,7 +262,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var clusterView: TextureView? = null
     private var oemThemeRuntime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime? = null
     private var oemThemeView: CarPlayOemThemeView? = null
-    private var oemVehicleProvider: AndroidCarPlayOemVehicleProvider? = null
+    private var oemVehicleProvider: AutoCloseable? = null
     private var oemUiResumed = false
     private var oemSpeedPermissionRequested = false
     private val oemSpeedPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -435,10 +439,12 @@ class CarPlayHostActivity : ComponentActivity() {
                 },
             )
             attachSurface(SCREEN_TYPE_MAIN, surface)
+            updateMainScreenTransform()
             scheduleDisplaySize(width, height)
         }
 
         override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            updateMainScreenTransform()
             scheduleDisplaySize(width, height)
         }
 
@@ -770,7 +776,15 @@ class CarPlayHostActivity : ComponentActivity() {
             }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
             visibility = if (ultraEnabled) View.VISIBLE else View.GONE
             isClickable = true
-            setOnTouchListener { view, event -> onHostTouch(view, event, forwardToCarPlay = false) }
+            // Accessory-side theme picker: long press = next layout style, double tap = next palette.
+            val themeGesture = GestureDetector(this@CarPlayHostActivity, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onLongPress(e: MotionEvent) = cycleClusterTheme(nextLayout = true)
+                override fun onDoubleTap(e: MotionEvent): Boolean { cycleClusterTheme(nextLayout = false); return true }
+            })
+            setOnTouchListener { view, event ->
+                if (!menuOpen) themeGesture.onTouchEvent(event)
+                onHostTouch(view, event, forwardToCarPlay = false)
+            }
         }
         val gestureLayer = View(this).apply {
             isClickable = true
@@ -3236,7 +3250,21 @@ class CarPlayHostActivity : ComponentActivity() {
             baseDisplay,
             displayScaleTenths,
         )
-        val display = scaledDisplay.copy(
+        // Ultra panels use the OEM asset's density (157 for both Center_Display and Cluster_Display).
+        val density = (oemThemeRuntime?.descriptor?.cluster?.get("density") as? Number)?.toDouble()?.takeIf { it > 0 }
+        fun ultraDisplay(stream: CarPlayAltScreenConfig) = AirPlayDisplayConfig(
+            widthPixels = stream.widthPixels,
+            heightPixels = stream.heightPixels,
+            widthPhysicalMm = maxOf(1, Math.round(density?.let { stream.widthPixels * 25.4 / it }
+                ?: (physical.widthMm * stream.widthPixels.toDouble() / size.width)).toInt()),
+            heightPhysicalMm = maxOf(1, Math.round(density?.let { stream.heightPixels * 25.4 / it }
+                ?: (physical.heightMm * stream.heightPixels.toDouble() / size.height)).toInt()),
+            fps = fps,
+        )
+        // Ultra main ignores display scale and the pane-relative safe area: the phone lays out Center_Display.
+        val display = if (ultraEnabled) {
+            ultraDisplay(CarPlayAltScreenConfig.ULTRA_MAIN).copy(safeAreaDrawOutside = safeAreaDrawOutside)
+        } else scaledDisplay.copy(
             safeArea = AirPlaySafeArea.toInsets(
                 mapping = AirPlayPersistence.loadSafeAreaRect(this, size.width, size.height),
                 activityWidthPixels = size.width,
@@ -3246,23 +3274,7 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
             safeAreaDrawOutside = safeAreaDrawOutside,
         )
-        val clusterDisplay = if (ultraEnabled) {
-            val descriptor = oemThemeRuntime?.descriptor
-            val clusterWidth = altScreenConfig.widthPixels
-            val clusterHeight = altScreenConfig.heightPixels
-            val density = (descriptor?.cluster?.get("density") as? Number)?.toDouble()?.takeIf { it > 0 }
-            AirPlayDisplayConfig(
-                widthPixels = clusterWidth,
-                heightPixels = clusterHeight,
-                widthPhysicalMm = maxOf(1, Math.round(density?.let { clusterWidth * 25.4 / it }
-                    ?: (physical.widthMm * clusterWidth.toDouble() / size.width)).toInt()),
-                heightPhysicalMm = maxOf(1, Math.round(density?.let { clusterHeight * 25.4 / it }
-                    ?: (physical.heightMm * clusterHeight.toDouble() / size.height)).toInt()),
-                fps = fps,
-            )
-        } else {
-            null
-        }
+        val clusterDisplay = if (ultraEnabled) ultraDisplay(altScreenConfig) else null
         return AirPlayConfig(
             deviceName = "xcertplay",
             deviceId = "02:00:00:00:00:02",
@@ -3482,7 +3494,7 @@ class CarPlayHostActivity : ComponentActivity() {
         updateAltScreenTransform()
         appendLog("OEM deployment source=APK profileOverride=${profileFile.exists()} " +
             "assetIdentity=${runtime.descriptor.assetId} contentVersion=${runtime.descriptor.version} " +
-            "sdk=${runtime.descriptor.sdkVersion} appliedVersion=0 fullAPL=false")
+            "sdk=${runtime.descriptor.sdkVersion} appliedVersion=${runtime.appliedVersion} fullAPL=false")
         return com.shilapi.xcertplay.airplay.CarPlayUltraVehicleProvisioning.create(
             trace = { message -> appendLog(message) }, profile = resolved,
             themeAssetDirectory = directory, themeRuntime = runtime)
@@ -3500,17 +3512,41 @@ class CarPlayHostActivity : ComponentActivity() {
         view.setTransform(matrix)
     }
 
+    private fun mainStreamFor(ultra: Boolean): CarPlayAltScreenConfig? =
+        if (ultra) CarPlayAltScreenConfig.ULTRA_MAIN else null
+
+    /** Fit-centers a pinned main stream; [CarPlayTouchMapper] maps touch through the same rect. */
+    private fun updateMainScreenTransform() {
+        val view = videoView ?: return
+        val stream = mainStreamConfig
+        val matrix = android.graphics.Matrix()
+        if (stream != null && view.width > 0 && view.height > 0) {
+            val rect = CarPlayTouchMapper.contentRect(view.width, view.height, stream.widthPixels, stream.heightPixels)
+            matrix.setScale((rect[2] / view.width).toFloat(), (rect[3] / view.height).toFloat(),
+                view.width / 2f, view.height / 2f)
+        }
+        view.setTransform(matrix)
+    }
+
     private fun bindOemVideoClock(renderer: AndroidMediaSink) {
         val runtime = oemThemeRuntime
         // The runtime outlives the Activity. Keep real remote PTS flowing while the UI is backgrounded.
         renderer.setVideoPresentationListener(if (runtime == null) null else { type, ptsUs ->
-            if (type == SCREEN_TYPE_ALT) runtime.onVideoFrame(ptsUs)
+            val display = if (type == SCREEN_TYPE_ALT) runtime.descriptor.cluster
+                else if (type == SCREEN_TYPE_MAIN) runtime.descriptor.center else null
+            (display?.get("id") as? String)?.let { runtime.onDisplayVideoFrame(it, ptsUs) }
         })
     }
 
     private fun startOemVehicleProvider() {
         val runtime = oemThemeRuntime ?: return
         if (!oemUiResumed || oemVehicleProvider != null) return
+        if (ULTRA_CLUSTER_MOCK_VEHICLE) {
+            oemVehicleProvider = CarPlayClusterMockVehicleFeed(
+                publish = { values -> if (oemThemeRuntime === runtime) runtime.updateVehicleValues(values) },
+                trace = { appendLog(it) }).also { it.start() }
+            return
+        }
         if (packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE) &&
             checkSelfPermission("android.car.permission.CAR_SPEED") != PackageManager.PERMISSION_GRANTED &&
             !oemSpeedPermissionRequested) {
@@ -3521,6 +3557,24 @@ class CarPlayHostActivity : ComponentActivity() {
         oemVehicleProvider = AndroidCarPlayOemVehicleProvider(applicationContext,
             publish = { values -> if (oemThemeRuntime === runtime) runtime.updateVehicleValues(values) },
             trace = { appendLog(it) }).also { it.start() }
+    }
+
+    private fun cycleClusterTheme(nextLayout: Boolean) {
+        val runtime = oemThemeRuntime ?: return
+        val descriptor = runtime.descriptor
+        val scene = runtime.scene
+        val (layoutId, paletteId) = if (nextLayout) {
+            val ids = descriptor.layouts.map { it["id"] as String }
+            val next = ids[(ids.indexOf(scene.layoutId) + 1) % ids.size]
+            next to descriptor.palette(next)
+        } else {
+            val palettes = descriptor.palettes(scene.layoutId)
+            val current = scene.paletteId ?: descriptor.palette(scene.layoutId)
+            scene.layoutId to palettes[(palettes.indexOf(current) + 1) % palettes.size]
+        }
+        if (!runtime.selectLocalTheme(layoutId, paletteId)) {
+            appendLog("Cluster theme follows the phone while UI Sync is connected")
+        }
     }
 
     private fun stopOemVehicleProvider() {
@@ -3622,6 +3676,8 @@ class CarPlayHostActivity : ComponentActivity() {
         bindOemVideoClock(snapshot.sink)
         startOemVehicleProvider()
         updateAltScreenTransform()
+        mainStreamConfig = snapshot.mainStream
+        updateMainScreenTransform()
         if (snapshot.width > 0 && snapshot.height > 0) {
             activeDisplaySize = DisplaySize(snapshot.width, snapshot.height)
         }
@@ -3666,6 +3722,8 @@ class CarPlayHostActivity : ComponentActivity() {
         val ultraProvisioning = if (ultraEnabled) createUltraProvisioning() else null
         val ultraRuntime = ultraProvisioning?.createRuntime()
         val airPlayConfig = createAirPlayConfig(size, ultraProvisioning, ultraRuntime)
+        mainStreamConfig = mainStreamFor(ultraEnabled)
+        updateMainScreenTransform()
         val locationProvider: Iap2LocationProvider? =
             if (config.locationReportingEnabled) {
                 AndroidCarPlayLocationProvider(this)
@@ -3727,7 +3785,7 @@ class CarPlayHostActivity : ComponentActivity() {
             locationProvider = locationProvider,
         )
         controller = next
-        CarPlayBackgroundSession.store(next, renderer, size.width, size.height, oemThemeRuntime)
+        CarPlayBackgroundSession.store(next, renderer, size.width, size.height, oemThemeRuntime, mainStreamConfig)
         next.start()
     }
 
@@ -4090,7 +4148,9 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
         if (!forwardToCarPlay) return true
-        val contacts = CarPlayTouchMapper.contacts(event, view.width, view.height)
+        val stream = mainStreamConfig
+        val contacts = CarPlayTouchMapper.contacts(event, view.width, view.height,
+            stream?.widthPixels ?: view.width, stream?.heightPixels ?: view.height)
         val queued = controller?.sendTouch(contacts) ?: false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
@@ -4299,6 +4359,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val TAG = "xcertplay-usb"
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
+        /** Minimal Ultra cluster: feed simulated vehicle data instead of Android VHAL. */
+        const val ULTRA_CLUSTER_MOCK_VEHICLE = true
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
         const val LOG_RENDER_INTERVAL_MILLIS = 100L
         const val MAX_SCREEN_LOG_LINES = 100
@@ -4347,6 +4409,7 @@ private object CarPlayBackgroundSession {
         val width: Int,
         val height: Int,
         val oemThemeRuntime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime?,
+        val mainStream: CarPlayAltScreenConfig?,
     )
 
     private var controller: CarPlayController? = null
@@ -4354,22 +4417,24 @@ private object CarPlayBackgroundSession {
     private var width = 0
     private var height = 0
     private var oemThemeRuntime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime? = null
+    private var mainStream: CarPlayAltScreenConfig? = null
 
     @Synchronized
     fun snapshot(): Snapshot? {
         val currentController = controller ?: return null
         val currentSink = sink ?: return null
-        return Snapshot(currentController, currentSink, width, height, oemThemeRuntime)
+        return Snapshot(currentController, currentSink, width, height, oemThemeRuntime, mainStream)
     }
 
     @Synchronized
     fun store(controller: CarPlayController, sink: AndroidMediaSink, width: Int, height: Int,
-        oemThemeRuntime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime?) {
+        oemThemeRuntime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime?, mainStream: CarPlayAltScreenConfig?) {
         this.controller = controller
         this.sink = sink
         this.width = width
         this.height = height
         this.oemThemeRuntime = oemThemeRuntime
+        this.mainStream = mainStream
     }
 
     @Synchronized
@@ -4380,5 +4445,6 @@ private object CarPlayBackgroundSession {
         width = 0
         height = 0
         oemThemeRuntime = null
+        mainStream = null
     }
 }

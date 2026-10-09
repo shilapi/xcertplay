@@ -98,7 +98,7 @@ class CarPlayThemeRcsContractTest {
                 assertTrue("Runtime load must finish before accepted=0", completed.get())
                 reply(152L)
                 assertTrue(runtime.loaded)
-                assertEquals(0L, runtime.appliedVersion)
+                assertEquals(985L, runtime.appliedVersion)
                 assertTrue(logs.any { "Theme transfer received version=985" in it })
                 assertFalse(logs.any { "bodyHex=" in it || "decryptedHex=" in it })
                 assertTrue(File(dir, "incoming").listFiles()!!.isEmpty())

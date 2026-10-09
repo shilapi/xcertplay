@@ -15,8 +15,10 @@ import com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime
 import com.shilapi.xcertplay.airplay.CarPlayOemScene
 import kotlin.math.min
 
-/** Local gauge overlay in OEM coordinates. Remote video remains on the TextureView beneath it.
- * This intentionally does not claim CP/APL animation, font, verified-telltale or filter parity.
+/** Local instrument cluster in OEM coordinates; remote DCA video remains on the TextureView beneath it.
+ * Style follows the active layout's `layoutStyleID`, colors follow the active palette. This is the minimal
+ * dashboard (see agent_docs/2026-10-09_ultra-minimal-cluster-dashboard.zh-CN.md), not CP/APL parity:
+ * no verified telltales, filters or asset animations.
  */
 class CarPlayOemThemeView(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -27,6 +29,14 @@ class CarPlayOemThemeView(context: Context) : View(context) {
     private var artworkLayout: String? = null
     private var artwork: List<Pair<OemArtwork, Bitmap>> = emptyList()
     private var bindGeneration = 0L
+    private val dashboard = CarPlayClusterDashboardRenderer()
+    private var colorCache: Pair<String, ClusterColors>? = null
+    private val speed = ClusterSmoothedValue()
+    private val rpm = ClusterSmoothedValue(ratePerSecond = 10.0)
+    private val fuel = ClusterSmoothedValue(ratePerSecond = 2.0)
+    private val coolant = ClusterSmoothedValue(ratePerSecond = 2.0)
+    private var smoothed = ClusterReadings.from(emptyMap())
+    private var lastFrameNanos = 0L
 
     fun bind(value: CarPlayOemThemeRuntime?) {
         if (runtime?.listener === ownedListener) runtime?.listener = null
@@ -34,7 +44,7 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         val generation = bindGeneration
         logo?.recycle(); logo = null
         artwork.forEach { it.second.recycle() }; artwork = emptyList(); artworkLayout = null
-        runtime = value; scene = value?.scene
+        runtime = value; scene = value?.scene; colorCache = null
         ownedListener = value?.let { host -> { state: CarPlayOemScene -> post {
             if (runtime === host && bindGeneration == generation) {
                 scene = state
@@ -65,14 +75,17 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         super.onDraw(canvas)
         val host = runtime ?: return
         val state = scene ?: return
-        if (!state.uiConnected || !state.layoutConfirmed) return
+        // The accessory always owns its instruments (asset gauges are `rendersLocally`); they do not wait for
+        // UI Sync. Before the phone confirms a layout, its initial DCA components define the video holes.
+        val layout = runCatching { host.descriptor.layout(state.layoutId) }.getOrNull() ?: return
         val scale = min(width.toFloat() / host.descriptor.clusterWidth, height.toFloat() / host.descriptor.clusterHeight)
         val saved = canvas.save()
         canvas.translate((width - host.descriptor.clusterWidth * scale) / 2,
             (height - host.descriptor.clusterHeight * scale) / 2)
         canvas.scale(scale, scale)
-        val plan = OemScenePlan.build(host.descriptor.layout(state.layoutId), state.activeComponents, state.vehicleValues)
-        // Phone video is already in full display coordinates. Keep confirmed remote zones transparent;
+        val active = state.activeComponents.ifEmpty { runCatching { host.descriptor.initialComponents(state.layoutId) }.getOrDefault(emptyMap()) }
+        val plan = OemScenePlan.build(layout, active, state.vehicleValues)
+        // Phone video is already in full display coordinates. Keep remote zones transparent;
         // mask its other pixels so phone content cannot bleed through locally rendered instruments.
         val mask = Path().apply {
             addRect(0f, 0f, host.descriptor.clusterWidth.toFloat(), host.descriptor.clusterHeight.toFloat(), Path.Direction.CW)
@@ -84,38 +97,54 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         resetPaint()
         paint.color = Color.BLACK
         canvas.drawPath(mask, paint)
+
+        val style = ClusterDialStyle.of(layout["layoutStyleID"])
+        val palette = state.paletteId ?: host.descriptor.palette(state.layoutId)
+        val colors = colorsFor(host, state.layoutId, palette, style)
+        val zones = ClusterZones.from(layout, plan)
+        dashboard.drawBackground(canvas, style, zones)
         artwork.forEach { (item, bitmap) ->
             resetPaint()
             resolveColor(host, state, item.colorId)?.let { paint.colorFilter = PorterDuffColorFilter(it, PorterDuff.Mode.SRC_IN) }
             canvas.drawBitmap(bitmap, null, item.frame.rect(), paint)
         }
-        logo?.let { image ->
+        if (style != ClusterDialStyle.MAPS_MEDIA) logo?.let { image ->
             val ratio = min(180f / image.width, 48f / image.height)
             val w = image.width * ratio; val h = image.height * ratio
             resetPaint(); paint.color = Color.WHITE
             canvas.drawBitmap(image, null, RectF((host.descriptor.clusterWidth - w) / 2, 660f,
                 (host.descriptor.clusterWidth + w) / 2, 660f + h), paint)
         }
-        plan.gauges.forEach { gauge ->
-            val frame = gauge.frame
-            gauge(canvas, frame.x, frame.y, frame.width, frame.height, gauge.reading, gauge.unit,
-                resolveColor(host, state, "radial.detailText") ?: Color.WHITE)
-        }
+        val moving = smooth(ClusterReadings.from(state.vehicleValues))
+        dashboard.draw(canvas, style, colors, zones, smoothed) { frame -> artwork.any { (item, _) -> frame.contains(item.frame) } }
         canvas.restoreToCount(saved)
+        if (moving) postInvalidateOnAnimation()
     }
 
-    private fun gauge(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, reading: Double?, unit: String, detailColor: Int) {
-        resetPaint()
-        // Diagnostic number overlay; full asset-native CP gauge/PRNDL semantics are not implemented.
-        paint.color = Color.rgb(50, 64, 59); paint.style = Paint.Style.STROKE; paint.strokeWidth = 6f
-        canvas.drawArc(RectF(x + 28, y + 28, x + w - 28, y + h - 28), 135f, 270f, false, paint)
-        paint.style = Paint.Style.FILL; paint.color = Color.WHITE; paint.textAlign = Paint.Align.CENTER
-        paint.textSize = min(w, h) * .2f
-        canvas.drawText(reading?.let { "%.0f".format(java.util.Locale.ROOT, it) } ?: "—", x + w / 2, y + h * .56f, paint)
-        paint.textSize = min(w, h) * .045f
-        paint.color = detailColor
-        canvas.drawText(if (reading == null) "Unavailable" else unit, x + w / 2, y + h * .66f, paint)
+    /** Glides speed/rpm/fuel/coolant toward the latest sample; returns true while another frame is needed. */
+    private fun smooth(target: ClusterReadings): Boolean {
+        val now = System.nanoTime()
+        val dt = if (lastFrameNanos == 0L) 0.0 else (now - lastFrameNanos) / 1e9
+        lastFrameNanos = now
+        val moving = listOf(speed.step(target.speed, dt), rpm.step(target.rpm, dt),
+            fuel.step(target.fuelPercent, dt), coolant.step(target.coolant, dt)).any { it }
+        if (!moving) lastFrameNanos = 0L
+        smoothed = target.copy(speed = speed.value, rpm = rpm.value, fuelPercent = fuel.value, coolant = coolant.value)
+        return moving
     }
+
+    private fun colorsFor(host: CarPlayOemThemeRuntime, layoutId: String, palette: String, style: ClusterDialStyle): ClusterColors {
+        val key = "$layoutId/$palette"
+        colorCache?.takeIf { it.first == key }?.let { return it.second }
+        val resolved = ClusterColors.resolve(style) { id ->
+            runCatching { host.descriptor.colorDefinition(layoutId, palette, id) }.getOrNull()
+        }
+        colorCache = key to resolved
+        return resolved
+    }
+
+    private fun OemFrame.contains(other: OemFrame) = other.x >= x && other.y >= y &&
+        other.x + other.width <= x + width && other.y + other.height <= y + height
 
     private fun OemFrame.rect() = RectF(x, y, x + width, y + height)
 

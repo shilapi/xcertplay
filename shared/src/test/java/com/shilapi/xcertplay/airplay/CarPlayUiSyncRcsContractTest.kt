@@ -22,7 +22,7 @@ class CarPlayUiSyncRcsContractTest {
                 fun receive(): Map<*, *> = BplistCodec.decode(phone.receiveNext(5_000)!!.body) as Map<*, *>
                 val reset = receive()
                 assertEquals(0L, reset["type"])
-                assertEquals(2L, reset["version"])
+                assertEquals(3L, reset["version"])
                 assertEquals(1L, reset["ssn"])
                 assertFalse(reset.containsKey("vehicleID"))
                 phone.sendComm(BplistCodec.encode(mapOf("type" to 1L, "ssn" to 1L, "psn" to 1L,

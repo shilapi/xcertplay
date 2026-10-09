@@ -30,7 +30,7 @@ class CarPlayOemDeploymentTest {
         val provisioning = CarPlayUltraVehicleProvisioning.create(themeRuntime = runtime)
         assertEquals("19.0", provisioning.sdkVersion)
         assertEquals("44C9FA31EC", provisioning.clusterAsset!!.assetId)
-        assertEquals(0L, provisioning.clusterAsset!!.assetVersion)
+        assertEquals(985L, provisioning.clusterAsset!!.assetVersion)
         assertEquals(985L, runtime.descriptor.version)
         assertEquals(1920, runtime.descriptor.clusterWidth)
         assertEquals(720, runtime.descriptor.clusterHeight)
@@ -52,7 +52,7 @@ class CarPlayOemDeploymentTest {
     @Test fun mismatchedProfileCannotAdvertiseOtherAssetSdkOrAppliedVersion() = deployed { runtime ->
         listOf(mapOf("sdkVersion" to "1.0"), mapOf("layoutIdentifier" to "unknown"),
             mapOf("clusterAsset" to mapOf("assetID" to "other", "assetVer" to 0L)),
-            mapOf("clusterAsset" to mapOf("assetID" to "44C9FA31EC", "assetVer" to 985L)))
+            mapOf("clusterAsset" to mapOf("assetID" to "44C9FA31EC", "assetVer" to 984L)))
             .forEach { invalid -> assertThrows(IllegalArgumentException::class.java) {
                 runtime.descriptor.resolveProfile(invalid)
             } }
@@ -63,7 +63,7 @@ class CarPlayOemDeploymentTest {
         assertFalse(runtime.scene.vehicleValues.containsKey("vehicleSpeed"))
         runtime.updateVehicleValues(mapOf("vehicleSpeed" to 42.0))
         assertEquals(42.0, runtime.scene.vehicleValues["vehicleSpeed"])
-        assertEquals(0L, runtime.appliedVersion)
+        assertEquals(985L, runtime.appliedVersion)
         runtime.disconnect()
         assertFalse(runtime.scene.uiConnected)
     }
@@ -209,37 +209,42 @@ class CarPlayOemDeploymentTest {
                 }
                 fun send(body: ByteArray) = phone.sendComm(OpackCodec.encode(mapOf(
                     "displayUUID" to "Cluster_Display", "data" to body)))
-                assertNull("Wait for the phone display session before transmitting", phone.receiveNext(100))
-                send(BplistCodec.encode(mapOf("type" to 0L, "ssn" to 1L, "psn" to 1L,
-                    "asn" to 0L, "version" to 3L, "id" to "paired-phone")))
                 val reset = receive()
-                assertEquals(0L, reset["type"])
-                assertEquals("paired-phone", reset["id"])
-                send(BplistCodec.encode(mapOf("type" to 1L, "ssn" to 1L, "psn" to 1L,
+                assertEquals("Accessory initiates the session", 0L, reset["type"])
+                send(BplistCodec.encode(mapOf("type" to 0L, "ssn" to 1L, "psn" to 1L,
+                    "asn" to 0L, "version" to 2L, "id" to "paired-phone")))
+                val reply = receive()
+                assertEquals("The phone's RESET is answered", 1L, reply["type"])
+                assertEquals(2L, reply["version"])
+                assertEquals(2L, reply["psn"])
+                assertEquals(1L, reply["asn"])
+                assertNotEquals(true, reply["noAck"])
+                assertEquals("paired-phone", reply["id"])
+                send(BplistCodec.encode(mapOf("type" to 1L, "ssn" to 1L, "psn" to 2L,
                     "asn" to 1L, "version" to 2L, "id" to "paired-phone")))
-                assertEquals(1L, receive()["type"])
                 val envelope = receive()
                 assertEquals(2L, envelope["type"])
+                assertEquals(3L, envelope["psn"])
                 val inner = BplistCodec.decode(envelope["data"] as ByteArray) as Map<*, *>
                 assertEquals(5L, inner["type"])
                 val request = inner["data"] as Map<*, *>
                 assertTrue(request["activeComponents"] is Map<*, *>)
-                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 2L,
-                    "asn" to 3L, "data" to BplistCodec.encode(mapOf("type" to 9L,
+                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 3L,
+                    "asn" to 2L, "data" to BplistCodec.encode(mapOf("type" to 9L,
                         "data" to mapOf("isTransitioning" to true))))))
                 assertEquals(3L, receive()["type"])
-                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 3L,
-                    "asn" to 4L, "data" to BplistCodec.encode(mapOf("type" to 3L,
+                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 4L,
+                    "asn" to 2L, "data" to BplistCodec.encode(mapOf("type" to 3L,
                         "data" to mapOf("layoutID" to request["layoutID"], "activeComponents" to request["activeComponents"]))))))
                 val ack = receive()
                 assertEquals(3L, ack["type"])
-                assertEquals(3L, ack["asn"])
+                assertEquals(4L, ack["asn"])
                 assertFalse(runtime.scene.transitioning)
                 runtime.onVideoFrame(299521500000L)
                 assertTrue(runtime.scene.transitioning)
                 assertEquals(request["layoutID"], runtime.scene.layoutId)
-                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 5L,
-                    "asn" to 5L, "data" to BplistCodec.encode(mapOf("type" to 9L,
+                send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 6L,
+                    "asn" to 2L, "data" to BplistCodec.encode(mapOf("type" to 9L,
                         "data" to mapOf("isTransitioning" to true))))))
                 assertEquals(0L, receive()["type"])
                 assertFalse("A reset must hide previously ready OEM UI", runtime.scene.uiConnected)

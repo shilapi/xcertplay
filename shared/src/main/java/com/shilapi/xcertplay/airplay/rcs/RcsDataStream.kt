@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay.rcs
 
 import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientType
 import java.io.Closeable
+import java.io.EOFException
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -163,7 +164,12 @@ class RcsDataStream private constructor(
         trace(message)
     }
 
-    override fun close() {
+    override fun close() = close(null)
+
+    /** A protocol failure is distinct from an intentional SETUP replacement or session teardown. */
+    fun fail(cause: Throwable) = close(cause)
+
+    private fun close(cause: Throwable?) {
         if (!closed.compareAndSet(false, true)) return
         synchronized(stateLock) {
             listeners.toList().forEach { runCatching { it.close() } }
@@ -174,7 +180,7 @@ class RcsDataStream private constructor(
         }
         runCatching { channel?.close() }
         channel = null
-        notifyClosed(null)
+        notifyClosed(cause)
     }
 
     private fun acceptLoop(listener: RcsListener) {
@@ -205,7 +211,7 @@ class RcsDataStream private constructor(
             if (channel === accepted) channel = null
             if (!closed.get()) {
                 if (failure != null) trace("RCS stream failed clientType=${clientType.name}: $failure")
-                notifyClosed(failure)
+                close(failure ?: EOFException("RCS peer closed ${clientType.name}"))
             }
         }
     }
@@ -224,7 +230,7 @@ class RcsDataStream private constructor(
                 }
         }
         if (failure != null) {
-            close()
+            close(failure)
         }
     }
 
@@ -249,7 +255,7 @@ class RcsDataStream private constructor(
                 }
         }
         if (failure != null) {
-            close()
+            close(failure)
         }
     }
 

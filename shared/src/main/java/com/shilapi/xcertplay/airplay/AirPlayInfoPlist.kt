@@ -75,7 +75,7 @@ object AirPlayInfoPlist {
         if (AirPlayFeature.UI_SYNC in responseFeatures && AirPlayFeature.ALT_SCREEN in responseFeatures) {
             config.ultra?.clusterDisplayPluginId?.let { pluginId ->
                 info["displayPanels"] = AirPlayDisplayDescriptionFactory.createPanels(
-                    displays.first(), displays[1], pluginId,
+                    displays.first(), displays[1], pluginId, config.ultra?.centerDisplayPluginId,
                 )
             }
         }

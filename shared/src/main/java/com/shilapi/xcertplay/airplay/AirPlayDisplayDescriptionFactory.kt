@@ -5,11 +5,13 @@ object AirPlayDisplayDescriptionFactory {
     /**
      * CarKit's logical-display fallback leaves supportsDDPContent false. The loaded OEM plugin
      * needs a physical panel whose initial stream matches the existing alternate-screen UUID.
-     * Main remains a physical CarPlay panel without an OEM plugin.
+     * Main gets the asset's Center_Display plugin when present, so DashBoard resolves the asset
+     * display ID instead of falling back to the main video UUID.
      */
     fun createPanels(main: Map<String, Any?>, cluster: Map<String, Any?>,
-        clusterPluginId: String): List<Map<String, Any?>> {
+        clusterPluginId: String, mainPluginId: String? = null): List<Map<String, Any?>> {
         require(clusterPluginId.isNotBlank()) { "OEM display plugin UID must be non-empty" }
+        require(mainPluginId == null || mainPluginId.isNotBlank()) { "OEM display plugin UID must be non-empty" }
         fun stream(display: Map<String, Any?>) = linkedMapOf<String, Any?>(
             "uuid" to display.getValue("uuid"), "originXPixels" to 0,
             "originYPixels" to 0, "zIndex" to 0,
@@ -23,13 +25,13 @@ object AirPlayDisplayDescriptionFactory {
             "properties" to properties,
             "initialVideoStreams" to listOf(stream(display)),
         )
+        fun plugin(uid: String, display: Map<String, Any?>) = listOf(linkedMapOf(
+            "uid" to uid, "managedVideoStreams" to listOf(stream(display)),
+        ))
         return listOf(
-            panel(main, listOf("CarPlay")),
+            panel(main, listOf("CarPlay")).apply { mainPluginId?.let { put("displayPlugins", plugin(it, main)) } },
             panel(cluster, listOf("Instrument Cluster", "Map", "showsInstruments")).apply {
-                put("displayPlugins", listOf(linkedMapOf(
-                    "uid" to clusterPluginId,
-                    "managedVideoStreams" to listOf(stream(cluster)),
-                )))
+                put("displayPlugins", plugin(clusterPluginId, cluster))
             },
         )
     }

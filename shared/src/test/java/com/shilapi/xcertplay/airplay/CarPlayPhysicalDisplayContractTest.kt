@@ -54,7 +54,14 @@ class CarPlayPhysicalDisplayContractTest {
         assertEquals(managed, (cluster["initialVideoStreams"] as List<*>).map { (it as Map<*, *>)["uuid"] })
         assertEquals(1920L, cluster["widthPixels"])
         assertEquals(720L, cluster["heightPixels"])
-        assertEquals(0L, config.ultra!!.clusterAsset!!.assetVersion)
+        assertEquals(985L, config.ultra!!.clusterAsset!!.assetVersion)
+        // Asset package.json names the centerConsole panel Center_Display; there are no 110/111 ids in the asset.
+        val main = physical.single { (it["properties"] as List<*>).contains("CarPlay") }
+        val mainPlugin = (main["displayPlugins"] as List<*>).single() as Map<*, *>
+        assertEquals("Center_Display", mainPlugin["uid"])
+        assertEquals(listOf(AirPlayInfoPlist.MAIN_UUID),
+            (mainPlugin["managedVideoStreams"] as List<*>).map { (it as Map<*, *>)["uuid"] })
+        assertEquals(AirPlayInfoPlist.MAIN_UUID, main["uid"])
     }
 
     @Test fun partialNegotiationsCannotCreateAnUnboundDdpDisplay() = deployed { config ->

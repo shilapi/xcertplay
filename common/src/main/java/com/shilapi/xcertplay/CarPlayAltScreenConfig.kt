@@ -23,5 +23,9 @@ data class CarPlayAltScreenConfig(val widthPixels: Int, val heightPixels: Int) {
     companion object {
         // Code configuration entry: change these together to request another instrument resolution.
         val DEFAULT = CarPlayAltScreenConfig(widthPixels = 1920, heightPixels = 720)
+
+        // Ultra main stream is pinned to the OEM asset's Center_Display size (package.json displays[].size)
+        // instead of the host pane, so the phone's centerConsole layout matches the declared panel.
+        val ULTRA_MAIN = CarPlayAltScreenConfig(widthPixels = 1920, heightPixels = 720)
     }
 }

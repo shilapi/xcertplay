@@ -60,11 +60,27 @@ object CarPlayUltraVehicleProvisioning {
         val sdkVersion = (deploymentProfile["sdkVersion"] ?: "1.0") as? String
             ?: throw IllegalArgumentException("Ultra sdkVersion must be a string")
         CarPlayThemeAssetStore.compareSDKVersions(sdkVersion, sdkVersion)
+        // ultra32 diagnostic profile. Set the timeout to null to require peer confirmation;
+        // disable deferred bootstrap to restore the previous accessory-first handshake.
+        val deferReset = deploymentProfile["uiSyncDeferInitialResetUntilPeer"] as? Boolean ?: (themeRuntime != null)
+        val peerReadyTimeout = if (deploymentProfile.containsKey("uiSyncPeerResetReadyTimeoutMillis"))
+            (deploymentProfile["uiSyncPeerResetReadyTimeoutMillis"] as? Number)?.toLong()
+        else if (themeRuntime != null) 6_000L else null
+        require(peerReadyTimeout == null || peerReadyTimeout > 0) { "Invalid UI Sync peer readiness timeout" }
+        val commandPayloadKey = deploymentProfile["uiSyncV3CommandPayloadKey"] as? String
+            ?: if (themeRuntime != null) "payload" else "data"
+        require(commandPayloadKey == "data" || commandPayloadKey == "payload") { "Invalid UI Sync v3 command payload key" }
+        val payloadDictionary = deploymentProfile["uiSyncV3CommandPayloadDictionary"] as? Boolean ?: (themeRuntime != null)
+        val omitFadeIn = deploymentProfile["uiSyncV3OmitFadeInNewLayout"] as? Boolean ?: (themeRuntime != null)
+        val probeBytes = (deploymentProfile["uiSyncRcsBackpressureProbeBytes"] as? Number)?.toInt() ?: 0
         val factories = linkedMapOf<com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientType,
             com.shilapi.xcertplay.airplay.rcs.RcsDataStreamHandlerFactory>(
             RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL to CarPlayUiSyncHandlerFactory(effectiveVehicleId,
                 initialLayout = deploymentProfile["layoutIdentifier"] as? String ?: "default",
-                initialAppearance = deploymentProfile["appearanceMode"] as? String ?: "dark", themeRuntime = themeRuntime))
+                initialAppearance = deploymentProfile["appearanceMode"] as? String ?: "dark", themeRuntime = themeRuntime,
+                deferInitialResetUntilPeer = deferReset, peerResetReadyTimeoutMillis = peerReadyTimeout,
+                commandPayloadKey = commandPayloadKey, commandPayloadDictionary = payloadDictionary,
+                omitFadeInNewLayout = omitFadeIn, rcsBackpressureProbeBytes = probeBytes))
         themeAssetDirectory?.let { directory ->
             factories[RcsClientTypes.CAR_PLAY_UPDATE_DATA] =
                 com.shilapi.xcertplay.airplay.rcs.transfer.CarPlayThemeTransferHandlerFactory(
@@ -88,6 +104,7 @@ object CarPlayUltraVehicleProvisioning {
             sdkVersion = sdkVersion,
             clusterAsset = asset,
             clusterDisplayPluginId = themeRuntime?.descriptor?.cluster?.get("id") as? String,
+            centerDisplayPluginId = themeRuntime?.descriptor?.center?.get("id") as? String,
         )
     }
 }

@@ -150,6 +150,7 @@ internal class CarPlayDataStreamFactory {
         }
         return OpenedCarPlayDataStream(port, stream) {
             try {
+                // An optional display control channel failing must not tear down main video/audio.
                 stream.attach(handler)
                 true
             } catch (error: Throwable) {

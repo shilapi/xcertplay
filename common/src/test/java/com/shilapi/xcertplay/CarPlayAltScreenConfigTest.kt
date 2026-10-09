@@ -22,6 +22,13 @@ class CarPlayAltScreenConfigTest {
             CarPlayAltScreenConfig.DEFAULT.fitWithin(1081, 2160))
     }
 
+    @Test fun ultraMainStreamMatchesTheAssetCenterDisplaySize() {
+        // work/carplay-ultra-ios27/downloaded-assets/44C9FA31EC-985 package.json: Center_Display size [1920, 720].
+        assertEquals(1920, CarPlayAltScreenConfig.ULTRA_MAIN.widthPixels)
+        assertEquals(720, CarPlayAltScreenConfig.ULTRA_MAIN.heightPixels)
+        assertEquals(CarPlayAltScreenConfig.Size(1080, 405), CarPlayAltScreenConfig.ULTRA_MAIN.fitWithin(1080, 1756))
+    }
+
     @Test fun anUnmeasuredPaneDoesNotProduceInvalidDimensions() {
         assertEquals(CarPlayAltScreenConfig.Size(0, 0), CarPlayAltScreenConfig.DEFAULT.fitWithin(0, 2160))
         assertEquals(CarPlayAltScreenConfig.Size(0, 0), CarPlayAltScreenConfig.DEFAULT.fitWithin(1920, 0))

@@ -234,6 +234,8 @@ data class AirPlayUltraConfig(
     val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
     /** Display plugin UID from the loaded OEM package; distinct from the logical stream UUID. */
     val clusterDisplayPluginId: String? = null,
+    /** Center_Display plugin UID; binds the main stream to the asset's centerConsole display. */
+    val centerDisplayPluginId: String? = null,
 )
 
 /** Immutable accessory configuration consumed by the AirPlay session server. */

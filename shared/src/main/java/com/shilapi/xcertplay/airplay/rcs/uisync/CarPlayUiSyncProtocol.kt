@@ -181,7 +181,7 @@ data class CarPlayUiSyncMessage(
         "asn" to acknowledgementSequenceNumber,
     ).apply {
         payload?.let { put("data", BplistCodec.encode(it)) }
-        put("noAck", noAck)
+        // The production asset reads noAck but never emits it. Keep it as an inbound/local flag.
         vehicleId?.let { put("vehicleID", it) }
         version?.let { put("version", it.wireValue) }
         remoteIdentifier?.let { put("id", it) }
@@ -302,7 +302,7 @@ object CarPlayUiSyncMessageFactory {
         return decodeWireValue(value)
     }
 
-    fun decodeWireValue(value: Any?): CarPlayUiSyncMessage {
+    fun decodeWireValue(value: Any?, packet: Boolean = false): CarPlayUiSyncMessage {
         val map = value as? Map<*, *>
             ?: throw CarPlayUiSyncProtocolException("UI Sync message must be a dictionary")
         val typed = LinkedHashMap<String, Any?>(map.size)
@@ -325,9 +325,12 @@ object CarPlayUiSyncMessageFactory {
         }
         require(!(typed.containsKey("data") && typed.containsKey("payload"))) { "Conflicting UI Sync data/payload" }
         val numericWire = typed["type"] !is String
-        val rawPayload = if (numericWire) typed["data"]?.let {
-            val bytes = it as? ByteArray ?: throw CarPlayUiSyncProtocolException("UI Sync data must be NSData")
-            BplistCodec.decode(bytes)
+        val rawPayload = if (numericWire) (typed["data"] ?: typed["payload"])?.let {
+            when {
+                it is ByteArray -> BplistCodec.decode(it)
+                (packet || typed.containsKey("payload")) && it is Map<*, *> -> it
+                else -> throw CarPlayUiSyncProtocolException("UI Sync data must be NSData or negotiated dictionary data")
+            }
         } else typed["payload"]
         val payload = when (val value = rawPayload) {
             null -> null
