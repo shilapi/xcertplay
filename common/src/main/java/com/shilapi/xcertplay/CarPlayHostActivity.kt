@@ -251,6 +251,13 @@ class CarPlayHostActivity : ComponentActivity() {
             }
         }
 
+    private var mainWebDisplay = CarPlayWebDisplayConfig()
+    private var clusterWebDisplay = CarPlayWebDisplayConfig(width = 1920)
+    private val webDisplays get() = CarPlayWebDisplayFactory.find(sink)
+    private var clusterPreview: TextureView? = null
+    private var clusterPreviewSurface: Surface? = null
+    private val webDisplayInputs = mutableMapOf<Int, Pair<EditText, EditText>>()
+    private val webDisplayRefresh = mutableListOf<() -> Unit>()
     private var videoView: TextureView? = null
     private var contentRoot: FrameLayout? = null
     private var gestureOverlay: View? = null
@@ -415,18 +422,19 @@ class CarPlayHostActivity : ComponentActivity() {
             }
             appendLog(if (existing === surface) "Texture surface reused" else "Texture surface created")
             attachSurface(surface)
+            updateWebDisplayPreviews()
             scheduleDisplaySize(width, height)
         }
 
         override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            updateWebDisplayPreviews()
             scheduleDisplaySize(width, height)
         }
 
         override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
             if (currentSurfaceTexture !== texture) return true
             currentSurface?.let { surface ->
-                sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
-                sink?.clearSurface(SCREEN_TYPE_ALT, surface)
+                detachSurface(SCREEN_TYPE_MAIN, surface)
                 surface.release()
             }
             currentSurface = null
@@ -482,6 +490,8 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun loadPersistedSettings() {
+        mainWebDisplay = AirPlayPersistence.loadWebDisplay(this, SCREEN_TYPE_MAIN)
+        clusterWebDisplay = AirPlayPersistence.loadWebDisplay(this, SCREEN_TYPE_ALT)
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         hevcSoftwareDecoderEnabled =
@@ -644,12 +654,13 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onDestroy() {
         stopMicrophoneGainTest()
         mainHandler.removeCallbacks(applyDisplaySize)
+        clusterPreviewSurface?.let { detachSurface(SCREEN_TYPE_ALT, it); it.release() }
+        clusterPreviewSurface = null
         mainHandler.removeCallbacks(expireOldLogLines)
         mainHandler.removeCallbacks(renderLogLines)
         mainHandler.removeCallbacks(drainScreenLogs)
         currentSurface?.let { surface ->
-            sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
-            sink?.clearSurface(SCREEN_TYPE_ALT, surface)
+            detachSurface(SCREEN_TYPE_MAIN, surface)
             surface.release()
         }
         currentSurface = null
@@ -748,14 +759,38 @@ class CarPlayHostActivity : ComponentActivity() {
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
         val editor = buildSafeAreaEditor().apply { visibility = View.GONE }
 
-        root.addView(video)
-        root.addView(
+        val mainFrame = FrameLayout(this).apply { addView(video) }
+        mainFrame.addView(
             gestureLayer,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        val cluster = TextureView(this).apply {
+            isOpaque = false
+            visibility = View.GONE
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                    texture.setDefaultBufferSize(clusterWebDisplay.width, clusterWebDisplay.height)
+                    clusterPreviewSurface = Surface(texture).also { attachDisplaySurface(SCREEN_TYPE_ALT, it) }
+                }
+                override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
+                override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+                override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                    clusterPreviewSurface?.let { detachSurface(SCREEN_TYPE_ALT, it); it.release() }
+                    clusterPreviewSurface = null
+                    return true
+                }
+            }
+        }
+        clusterPreview = cluster
+        val displays = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(cluster, LinearLayout.LayoutParams(1, 1).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            addView(mainFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        root.addView(displays, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(logScroll, statusParams)
         root.addView(stageStatus, stageParams)
         root.addView(settingsButton, settingsButtonParams)
@@ -776,6 +811,7 @@ class CarPlayHostActivity : ComponentActivity() {
         root.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
                 updateMediaMetricsOverlayLayout(right - left, bottom - top)
+                updateWebDisplayPreviews()
             }
         }
         videoView = video
@@ -786,6 +822,7 @@ class CarPlayHostActivity : ComponentActivity() {
         statusView = log
         statusScrollView = logScroll
         stageStatusView = stageStatus
+        updateWebDisplayPreviews()
         updateDebugOverlays()
         return root
     }
@@ -1167,6 +1204,17 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(16) },
         )
 
+        content.addView(
+            settingsCategoryHeader("Web displays"),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(32) },
+        )
+        for (type in listOf(SCREEN_TYPE_MAIN, SCREEN_TYPE_ALT)) {
+            content.addView(buildWebDisplaySection(type),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { topMargin = dp(16) })
+        }
+
         val hevcRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1465,6 +1513,8 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun persistMenuSettings() {
+        AirPlayPersistence.saveWebDisplay(this, SCREEN_TYPE_MAIN, mainWebDisplay)
+        AirPlayPersistence.saveWebDisplay(this, SCREEN_TYPE_ALT, clusterWebDisplay)
         AirPlayPersistence.saveWirelessEnabled(this, wirelessEnabled)
         AirPlayPersistence.saveMfiTarget(this, mfiTarget)
         AirPlayPersistence.saveMfiI2cPath(this, mfiI2cPath)
@@ -1525,6 +1575,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun restoreSettingsBaseline() {
         val baseline = settingsBaseline ?: return
         loadPersistedSettings()
+        webDisplayRefresh.forEach { it() }
+        updateWebDisplayPreviews()
         baseline.safeAreaSize?.let { size ->
             baseline.safeAreaRect?.let { rect ->
                 AirPlayPersistence.saveSafeAreaRect(
@@ -1562,6 +1614,78 @@ class CarPlayHostActivity : ComponentActivity() {
         updateDebugOverlays()
         applyFullscreenMode()
         refreshDisplaySizeAfterLayout()
+    }
+
+    private fun webDisplayConfig(type: Int) = if (type == SCREEN_TYPE_MAIN) mainWebDisplay else clusterWebDisplay
+
+    private fun setWebDisplayConfig(type: Int, config: CarPlayWebDisplayConfig) {
+        if (type == SCREEN_TYPE_MAIN) mainWebDisplay = config else clusterWebDisplay = config
+        updateWebDisplayPreviews()
+        updateResolutionMenu()
+    }
+
+    private fun buildWebDisplaySection(type: Int): View {
+        val section = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val enabled = settingsSwitchRow(
+            label = if (type == SCREEN_TYPE_MAIN) "Main display" else "Instrument display",
+            checked = webDisplayConfig(type).enabled,
+            description = "Open this display in a browser on the same network",
+        ) { checked ->
+            setWebDisplayConfig(type, webDisplayConfig(type).copy(enabled = checked))
+            details.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+        section.addView(enabled)
+        val resolution = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        fun dimension(value: Int, hint: String) = EditText(this).apply {
+            setText(value.toString()); this.hint = hint; contentDescription = hint
+            inputType = InputType.TYPE_CLASS_NUMBER; setSingleLine(); setTextColor(Color.WHITE)
+        }
+        val width = dimension(webDisplayConfig(type).width, "Width")
+        val height = dimension(webDisplayConfig(type).height, "Height")
+        webDisplayInputs[type] = width to height
+        resolution.addView(width, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        resolution.addView(menuText(" × ", 18f, MENU_SECONDARY))
+        resolution.addView(height, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        details.addView(menuText("Resolution", 15f, MENU_SECONDARY))
+        details.addView(resolution)
+        val preview = settingsSwitchRow("Local preview", webDisplayConfig(type).preview,
+            "Fit the preview to the configured resolution") { checked ->
+            setWebDisplayConfig(type, webDisplayConfig(type).copy(preview = checked))
+        }
+        details.addView(preview)
+        val address = menuText("", 13f, MENU_ACCENT).apply { setTextIsSelectable(true) }
+        details.addView(address)
+        details.addView(menuText("Apply with Save & Reconnect", 13f, MENU_SECONDARY))
+        section.addView(details)
+        webDisplayRefresh += {
+            val config = webDisplayConfig(type)
+            ((enabled as ViewGroup).getChildAt(1) as Switch).isChecked = config.enabled
+            ((preview as ViewGroup).getChildAt(1) as Switch).isChecked = config.preview
+            width.setText(config.width.toString()); height.setText(config.height.toString())
+            width.error = null; height.error = null
+            details.visibility = if (config.enabled) View.VISIBLE else View.GONE
+            address.text = CarPlayWebDisplayFactory.urls(type, AirPlayPersistence.webDisplayKey(this))
+                .joinToString("\n").ifEmpty { "Connect to a local network to get the display address" }
+        }
+        webDisplayRefresh.last().invoke()
+        return section
+    }
+
+    private fun validateWebDisplaySettings(): Boolean {
+        for ((type, inputs) in webDisplayInputs) {
+            val config = webDisplayConfig(type)
+            if (!config.enabled) continue
+            val updated = runCatching { config.copy(width = inputs.first.text.toString().toInt(), height = inputs.second.text.toString().toInt()) }
+                .getOrElse {
+                    inputs.first.error = "Use even dimensions: 320–3840 × 240–2160"
+                    inputs.second.error = inputs.first.error
+                    inputs.first.requestFocus()
+                    return false
+                }
+            setWebDisplayConfig(type, updated)
+        }
+        return true
     }
 
     private fun buildMfiTargetSection(): View {
@@ -3076,7 +3200,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val resolution = if (native == null) {
             "Handshake resolution: waiting for display"
         } else {
-            val negotiated = CarPlayDisplayScale.apply(
+            val negotiated = mainWebDisplay.override(CarPlayDisplayScale.apply(
                 AirPlayDisplayConfig(
                     widthPixels = native.width,
                     heightPixels = native.height,
@@ -3084,7 +3208,7 @@ class CarPlayHostActivity : ComponentActivity() {
                     fps = fps,
                 ),
                 displayScaleTenths,
-            )
+            ))
             "Handshake resolution: ${native.width} x ${native.height} -> " +
                 "${negotiated.widthPixels} x ${negotiated.heightPixels}"
         }
@@ -3149,7 +3273,7 @@ class CarPlayHostActivity : ComponentActivity() {
             baseDisplay,
             displayScaleTenths,
         )
-        val display = scaledDisplay.copy(
+        val display = mainWebDisplay.override(scaledDisplay.copy(
             safeArea = AirPlaySafeArea.toInsets(
                 mapping = AirPlayPersistence.loadSafeAreaRect(this, size.width, size.height),
                 activityWidthPixels = size.width,
@@ -3158,13 +3282,18 @@ class CarPlayHostActivity : ComponentActivity() {
                 displayHeightPixels = scaledDisplay.heightPixels,
             ),
             safeAreaDrawOutside = safeAreaDrawOutside,
-        )
+        ))
+        val cluster = clusterWebDisplay.takeIf { it.enabled }?.let {
+            it.override(AirPlayDisplayConfig(it.width, it.height, widthPhysicalMm = widthPhysicalMm, fps = fps,
+                primaryInputDevice = 0))
+        }
         return AirPlayConfig(
             deviceName = "xcertplay",
             deviceId = "02:00:00:00:00:02",
             btMac = "02:00:00:00:00:01",
             sourceVersion = "950.7.1",
             main = display,
+            cluster = cluster,
             rightHandDrive = rightHandDrive,
             hevc = hevcEnabled,
             microphone = microphoneAvailable,
@@ -3321,23 +3450,37 @@ class CarPlayHostActivity : ComponentActivity() {
         model.trim().ifBlank { AirPlayPersistence.DEFAULT_MODEL }
 
     private fun createMediaSink(
-        videoWidth: Int,
-        videoHeight: Int,
+        airPlayConfig: AirPlayConfig,
         controllerGeneration: Int,
-    ): AndroidMediaSink = AndroidMediaSink(
-        context = applicationContext,
-        surface = null,
-        videoWidth = videoWidth,
-        videoHeight = videoHeight,
-        preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
-        advancedAudioChannelMapping = advancedAudioChannelMapping,
-        mainMediaAudioBufferDurationMs = mainMediaAudioBufferDurationMs,
-        microphoneGainPercent = microphoneGainPercent,
-        mediaMetricsMonitor = mediaMetricsMonitor,
-        onScreenStreamActiveChanged = { type, active ->
-            onScreenStreamStateChanged(controllerGeneration, type, active)
-        },
-    )
+    ): AndroidMediaSink {
+        val outputs = CarPlayWebDisplayFactory.create(
+            context = applicationContext,
+            configs = mapOf(SCREEN_TYPE_MAIN to mainWebDisplay, SCREEN_TYPE_ALT to clusterWebDisplay),
+            key = AirPlayPersistence.webDisplayKey(this),
+            sendTouch = { CarPlayBackgroundSession.snapshot()?.controller?.sendTouch(it) ?: false },
+        )
+        return try {
+            AndroidMediaSink(
+                context = applicationContext,
+                videoWidth = airPlayConfig.main.widthPixels,
+                videoHeight = airPlayConfig.main.heightPixels,
+                videoSizes = buildMap {
+                    put(SCREEN_TYPE_MAIN, airPlayConfig.main.widthPixels to airPlayConfig.main.heightPixels)
+                    airPlayConfig.cluster?.let { put(SCREEN_TYPE_ALT, it.widthPixels to it.heightPixels) }
+                },
+                preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
+                advancedAudioChannelMapping = advancedAudioChannelMapping,
+                mainMediaAudioBufferDurationMs = mainMediaAudioBufferDurationMs,
+                microphoneGainPercent = microphoneGainPercent,
+                mediaMetricsMonitor = mediaMetricsMonitor,
+                onClosed = { outputs?.close() },
+                onVideoOutputActiveChanged = { type, active -> outputs?.streamActive(type, active) },
+                onScreenStreamActiveChanged = { type, active ->
+                    onScreenStreamStateChanged(controllerGeneration, type, active)
+                },
+            ).also { outputs?.bind(it) }
+        } catch (error: Exception) { outputs?.close(); throw error }
+    }
 
     private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
         CarPlayMediaEngine(
@@ -3436,6 +3579,8 @@ class CarPlayHostActivity : ComponentActivity() {
             onScreenStreamStateChanged(restartGeneration, type, active)
         }
         currentSurface?.let(::attachSurface)
+        clusterPreviewSurface?.let { attachDisplaySurface(SCREEN_TYPE_ALT, it) }
+        updateWebDisplayPreviews()
         val serviceReused = snapshot.controller.hasActiveAirPlayAttachment()
         appendLog(
             if (serviceReused) {
@@ -3489,13 +3634,17 @@ class CarPlayHostActivity : ComponentActivity() {
                 "location=${config.locationReportingEnabled} " +
                 "mfi=${config.mfiTarget}",
         )
-        val renderer = createMediaSink(
-            videoWidth = airPlayConfig.main.widthPixels,
-            videoHeight = airPlayConfig.main.heightPixels,
-            controllerGeneration = controllerGeneration,
-        )
+        val renderer = try {
+            createMediaSink(airPlayConfig, controllerGeneration)
+        } catch (error: Exception) {
+            appendLog("Could not create web displays: ${error.message}")
+            setConnectionStage("Could not start web displays; check resolution and port 8080")
+            return
+        }
         sink = renderer
         currentSurface?.let(::attachSurface)
+        clusterPreviewSurface?.let { attachDisplaySurface(SCREEN_TYPE_ALT, it) }
+        updateWebDisplayPreviews()
         val media = createMediaEngine(renderer)
         val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
             AirPlayPersistence.savePairing(this, id, key)
@@ -3563,7 +3712,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 "Display updated while handshake is reset: " +
                     "${previous.width}x${previous.height} -> ${size.width}x${size.height}",
             )
-        } else {
+        } else if (!mainWebDisplay.enabled) {
             restartCarPlay(
                 "Display changed ${previous.width}x${previous.height} -> ${size.width}x${size.height}",
             )
@@ -3670,6 +3819,7 @@ class CarPlayHostActivity : ComponentActivity() {
         setConnectionStage("Reconnecting after settings")
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
+        webDisplayRefresh.forEach { it() }
         syncMainMediaAudioBufferControls()
         syncMicrophoneGainControls()
         microphoneTestButton?.isEnabled = false
@@ -3705,6 +3855,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (!menuOpen) return
         if (!validateMfiSettings()) return
         if (!validateManualHotspotSettings()) return
+        if (!validateWebDisplaySettings()) return
         persistMenuSettings()
         settingsBaseline = null
         finishSettingsMenu("Settings saved")
@@ -3722,6 +3873,7 @@ class CarPlayHostActivity : ComponentActivity() {
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
+        updateWebDisplayPreviews()
         updateDebugOverlays()
         clearScreenLogs()
         appendLog(
@@ -3770,9 +3922,40 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    private fun attachSurface(surface: Surface) {
-        sink?.setSurface(SCREEN_TYPE_MAIN, surface)
-        sink?.setSurface(SCREEN_TYPE_ALT, surface)
+    private fun attachSurface(surface: Surface) = attachDisplaySurface(SCREEN_TYPE_MAIN, surface)
+
+    private fun attachDisplaySurface(type: Int, surface: Surface) {
+        val outputs = CarPlayWebDisplayFactory.find(sink)
+        if (outputs?.owns(type) == true) outputs.preview(type, surface) else sink?.setSurface(type, surface)
+    }
+
+    private fun detachSurface(type: Int, surface: Surface) {
+        val outputs = CarPlayWebDisplayFactory.find(sink)
+        if (outputs?.owns(type) == true) outputs.preview(type, null) else sink?.clearSurface(type, surface)
+    }
+
+    private fun updateWebDisplayPreviews() {
+        val view = videoView
+        view?.visibility = if (!mainWebDisplay.enabled || mainWebDisplay.preview) View.VISIBLE else View.INVISIBLE
+        val matrix = android.graphics.Matrix()
+        if (view != null && view.width > 0 && view.height > 0 && mainWebDisplay.enabled) {
+            val rect = CarPlayTouchMapper.contentRect(view.width, view.height, mainWebDisplay.width, mainWebDisplay.height)
+            matrix.setScale((rect[2] / view.width).toFloat(), (rect[3] / view.height).toFloat(), view.width / 2f, view.height / 2f)
+        }
+        view?.setTransform(matrix)
+        clusterPreview?.let { cluster ->
+            cluster.visibility = if (clusterWebDisplay.enabled && clusterWebDisplay.preview) View.VISIBLE else View.GONE
+            val root = contentRoot
+            if (root != null && root.width > 0 && root.height > 0) {
+                val scale = minOf(root.width.toDouble() / clusterWebDisplay.width, root.height * 0.35 / clusterWebDisplay.height)
+                val params = cluster.layoutParams
+                val width = (clusterWebDisplay.width * scale).toInt().coerceAtLeast(1)
+                val height = (clusterWebDisplay.height * scale).toInt().coerceAtLeast(1)
+                if (params.width != width || params.height != height) { params.width = width; params.height = height; cluster.layoutParams = params }
+            }
+        }
+        currentSurface?.let { webDisplays?.preview(SCREEN_TYPE_MAIN, it) }
+        clusterPreviewSurface?.let { webDisplays?.preview(SCREEN_TYPE_ALT, it) }
     }
 
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
@@ -3854,7 +4037,10 @@ class CarPlayHostActivity : ComponentActivity() {
             return true
         }
 
-        val contacts = CarPlayTouchMapper.contacts(event, view.width, view.height)
+        if (mainWebDisplay.enabled && !mainWebDisplay.preview) return true
+        val contacts = CarPlayTouchMapper.contacts(event, view.width, view.height,
+            if (mainWebDisplay.enabled) mainWebDisplay.width else view.width,
+            if (mainWebDisplay.enabled) mainWebDisplay.height else view.height)
         val queued = controller?.sendTouch(contacts) ?: false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,

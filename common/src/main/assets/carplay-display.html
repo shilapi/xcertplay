@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>xcertplay</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#080808;color:#eee}*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column}header{display:flex;align-items:center;gap:16px;padding:12px 20px;background:#161419}h1{font-size:17px;margin:0;font-weight:600}#status{font-size:13px;color:#aaa;flex:1}button{background:#a67df2;color:#100b18;border:0;border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}main{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;touch-action:none}img{width:100%;height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}img[hidden]{display:none}#waiting{position:absolute;color:#aaa;text-align:center;padding:24px;pointer-events:none}.stale{opacity:.4}:fullscreen header{display:none}
+</style>
+<header><h1 id="title">xcertplay</h1><span id="status">Connecting…</span><button id="fullscreen">Full screen</button></header>
+<main id="surface"><img id="screen" alt="CarPlay display" hidden draggable="false"><div id="waiting">Waiting for CarPlay</div></main>
+<script>
+'use strict';
+const surface=document.getElementById('surface'),screen=document.getElementById('screen'),status=document.getElementById('status'),waiting=document.getElementById('waiting');
+const route=location.pathname.replace(/\/$/,''),key=new URLSearchParams(location.search).get('key')||'',main=route==='/main';
+document.getElementById('title').textContent=main?'xcertplay · Main display':'xcertplay · Instrument display';
+const client=Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('');
+let sequence=0,imageUrl=null,live=false,width=0,height=0,generation=0;
+const pointers=new Map();
+function endpoint(action){const url=new URL(`${route}/${action}`,location.origin);url.searchParams.set('key',key);return url;}
+function mapPoint(x,y,rect,width,height,clamp=false){
+  if(!rect.width||!rect.height||!width||!height)return null;
+  const scale=Math.min(rect.width/width,rect.height/height),w=width*scale,h=height*scale;
+  const px=(x-rect.left-(rect.width-w)/2)/w,py=(y-rect.top-(rect.height-h)/2)/h;
+  if(!clamp&&(px<0||px>1||py<0||py>1))return null;
+  return {x:Math.max(0,Math.min(1,px)),y:Math.max(0,Math.min(1,py))};
+}
+function contacts(){return [...pointers.values()].sort((a,b)=>a.id-b.id).map(p=>`${p.id},${p.x},${p.y}`).join(';');}
+let sending=false,queue=[],touchGeneration=0;
+async function drain(){
+  if(sending)return;sending=true;
+  const token=touchGeneration;
+  try{
+    while(queue.length&&token===touchGeneration){
+      const item=queue.shift(),url=endpoint('touch');url.searchParams.set('client',client);url.searchParams.set('contacts',item.value);
+      const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),1500);
+      let response;try{response=await fetch(url,{method:'POST',cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
+      if(!response.ok)throw new Error('Control unavailable');
+    }
+  }catch(_){queue=[];pointers.clear();live=false;beaconRelease();status.textContent='Control interrupted';}
+  finally{sending=false;if(queue.length)drain();}
+}
+function sendTouch(kind='edge'){
+  if(!main)return;
+  const item={kind,value:contacts()},tail=queue[queue.length-1];
+  if(kind==='move'&&tail?.kind==='move')queue[queue.length-1]=item;
+  else if(queue.length<32)queue.push(item);
+  else{queue=[];pointers.clear();live=false;beaconRelease();return;}
+  drain();
+}
+function beaconRelease(){if(!main)return;const url=endpoint('touch');url.searchParams.set('client',client);url.searchParams.set('contacts','');navigator.sendBeacon(url,'');}
+function release(){if(!pointers.size)return;pointers.clear();sendTouch();}
+function state(active,message){live=active;screen.classList.toggle('stale',!active);waiting.hidden=active;status.textContent=message;if(!active)release();}
+async function poll(token){
+  if(token!==generation||document.hidden)return;
+  const started=Date.now(),controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),3000);
+  try{
+    const url=endpoint('frame');url.searchParams.set('after',sequence);
+    const response=await fetch(url,{cache:'no-store',signal:controller.signal});
+    if(token!==generation)return;
+    if(response.status===401){state(false,'Display address has changed');return;}
+    if(response.status!==200&&response.status!==204)throw new Error('Unavailable');
+    width=Number(response.headers.get('X-Display-Width'));height=Number(response.headers.get('X-Display-Height'));
+    const active=response.headers.get('X-Stream-Active')==='true';
+    if(response.status===200){
+      const blob=await response.blob();if(token!==generation)return;
+      const next=URL.createObjectURL(blob);
+      await new Promise((resolve,reject)=>{screen.onload=resolve;screen.onerror=reject;screen.src=next;}).catch(error=>{URL.revokeObjectURL(next);throw error;});
+      if(token!==generation){URL.revokeObjectURL(next);return;}
+      if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=next;screen.hidden=false;
+      sequence=Number(response.headers.get('X-Frame-Sequence'));
+    }
+    if(!active){sequence=0;screen.hidden=true;}
+    state(active&&!screen.hidden,active&&!screen.hidden?`${width} × ${height}`:'Waiting for CarPlay');
+  }catch(_){if(token===generation)state(false,'Reconnecting…');}
+  finally{clearTimeout(timeout);}
+  if(token===generation)setTimeout(()=>poll(token),Math.max(0,66-(Date.now()-started)));
+}
+surface.addEventListener('contextmenu',event=>event.preventDefault());
+surface.addEventListener('pointerdown',event=>{
+  if(!main||!live||pointers.size>=2||(event.pointerType==='mouse'&&event.button!==0))return;
+  const point=mapPoint(event.clientX,event.clientY,surface.getBoundingClientRect(),width,height);if(!point)return;
+  event.preventDefault();const id=[...pointers.values()].some(p=>p.id===0)?1:0;
+  pointers.set(event.pointerId,{id,...point});surface.setPointerCapture(event.pointerId);sendTouch();
+});
+surface.addEventListener('pointermove',event=>{
+  const p=pointers.get(event.pointerId);if(!p)return;
+  const point=mapPoint(event.clientX,event.clientY,surface.getBoundingClientRect(),width,height,true);if(!point)return;
+  Object.assign(p,point);sendTouch('move');
+});
+function up(event){if(pointers.delete(event.pointerId))sendTouch();}
+for(const name of ['pointerup','pointercancel','lostpointercapture'])surface.addEventListener(name,up);
+setInterval(()=>{if(pointers.size)sendTouch('move');},400);
+window.addEventListener('blur',release);
+document.addEventListener('visibilitychange',()=>{generation++;release();if(!document.hidden)poll(generation);});
+window.addEventListener('pagehide',()=>{generation++;touchGeneration++;queue=[];pointers.clear();beaconRelease();if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;});
+window.addEventListener('pageshow',event=>{if(event.persisted){sequence=0;screen.hidden=true;poll(++generation);}});
+document.getElementById('fullscreen').addEventListener('click',async()=>{
+  try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}
+  catch(_){status.textContent='Use the browser menu for full screen';}
+});
+poll(generation);
+</script>
+</html>

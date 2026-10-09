@@ -39,7 +39,11 @@ class AndroidMediaSink(
     private val microphoneGainPercent: Int = MicrophoneGain.DEFAULT_PERCENT,
     mediaMetricsMonitor: MediaMetricsMonitor? = null,
     onScreenStreamActiveChanged: ((Int, Boolean) -> Unit)? = null,
+    private val videoSizes: Map<Int, Pair<Int, Int>> = emptyMap(),
+    private val onVideoOutputActiveChanged: (Int, Boolean) -> Unit = { _, _ -> },
+    private val onClosed: () -> Unit = {},
 ) : MediaSink {
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val defaultSurface = surface
     @Volatile private var screenStreamActiveChanged = onScreenStreamActiveChanged
     private val surfaces = ConcurrentHashMap<Int, Surface>()
@@ -94,6 +98,7 @@ class AndroidMediaSink(
             pendingVideoCodec.remove(type)
             videoRecoveryHandlers.remove(type)
         }
+        onVideoOutputActiveChanged(type, active)
         screenStreamActiveChanged?.invoke(type, active)
     }
 
@@ -121,6 +126,7 @@ class AndroidMediaSink(
     }
 
     fun close() {
+        if (!closed.compareAndSet(false, true)) return
         videoDecoders.values.forEach(VideoDecoder::close)
         videoDecoders.clear()
         videoRecoveryHandlers.clear()
@@ -129,14 +135,15 @@ class AndroidMediaSink(
         audioRenderers.clear()
         microphoneUplinks.values.forEach(MicrophoneUplink::close)
         microphoneUplinks.clear()
+        onClosed()
     }
 
     private fun videoDecoder(type: Int): VideoDecoder =
         videoDecoders.computeIfAbsent(type) {
             VideoDecoder(
                 surfaces[type] ?: defaultSurface,
-                videoWidth,
-                videoHeight,
+                videoSizes[type]?.first ?: videoWidth,
+                videoSizes[type]?.second ?: videoHeight,
                 preferSoftwareHevcDecoder,
                 mediaMetricsMonitor,
                 requestKeyFrame = { videoRecoveryHandlers[type]?.invoke() ?: false },

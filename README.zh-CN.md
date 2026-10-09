@@ -13,6 +13,7 @@
 - 支持触发 CarPlay Ultra （未测试/未完成的协议栈，但是确实可以在 iPhone 上触发 CarPlay Ultra 的提示）。
 - 支持语音、导航、音乐多通道音频输出并 mapping 至 Android 的对应通道。
 - 支持动态 Activity resize ，并自动重新握手至新的分辨率。
+- 支持主屏和仪表的独立网页输出、分辨率覆盖及本地预览。
 - 支持车机位置回传。
 - 支持 Android 9 (API 28) 。
 
@@ -25,6 +26,16 @@
 4. 滑动到底部，选择 `Save & Reconnect`。
 5. 按照你选择的方式连接 MFi 芯片。
 6. 等待连接完成，然后开始使用。
+
+## 网页显示
+
+在设置中的 `Web displays` 分别开启 `Main display` 和 `Instrument display`。开启后填写宽、高，选择是否启用 `Local preview`，然后点击 `Save & Reconnect`。每路设置独立保存；开启时使用填写的实际协商分辨率，不再应用 Activity 尺寸或分辨率缩放。关闭主屏网页输出后恢复原来的 Activity 分辨率策略。
+
+Android 与浏览器设备接入同一个局域网，在浏览器中打开开关下方提供的完整地址。主屏使用 `/main`，仪表使用 `/cluster`，共用端口 8080。地址中的访问凭据随安装保存，设置界面支持选择并复制地址。网页提供全屏；主屏支持最多双指触控，仪表为显示窗口。本地两路预览分别按协商分辨率的比例显示，预览开关不影响网页输出。
+
+当前网页视频使用 JPEG 兼容传输，最高约 15 fps；音频与麦克风继续走 Android。仪表需要 iPhone 建立第二屏视频流（type 111）；等待该流时页面显示等待状态。此功能没有引入完整 CarPlay Ultra 协议栈。无浏览器观看时跳过图像读取和 JPEG 压缩，慢浏览器只获取最新画面；失联触控在 1.5 秒后释放。
+
+设备验证时，先单独开启主屏，再开启仪表，检查两页显示的尺寸与配置一致；分别关闭本地预览，确认网页继续更新；旋转或调整 Android 窗口，确认已覆盖的协商分辨率不变。修改分辨率后进入并退出安全区域编辑器，输入应保留；退出设置而不保存时恢复原配置。
 
 ## 当前进度
 
@@ -82,13 +93,13 @@ Remote MFi 客户端把远程服务当作一块 MFi 芯片远程调用，抑或�
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew.bat :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+.\gradlew.bat :shared:testDebugUnitTest :common:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 在 macOS 或 Linux 中：
 
 ```bash
-./gradlew :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 构建未签名 release APK：
