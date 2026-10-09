@@ -25,7 +25,7 @@ data class CafRcsFrame(
     val envelope: CafEnvelope,
     val rcsBody: ByteArray,
 ) {
-    fun asRcsMessage(): RcsMessage = RcsMessage.comm(rcsBody)
+    fun asRcsMessage(): RcsMessage = RcsMessage.uplink(rcsBody)
 }
 
 class CafMessageReader internal constructor(

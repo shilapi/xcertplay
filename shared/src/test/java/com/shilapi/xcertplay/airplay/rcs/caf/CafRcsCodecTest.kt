@@ -83,12 +83,17 @@ class CafRcsCodecTest {
 
         val rawIap = byteArrayOf(0x40, 0x40, 1, 2, 3)
         val message = IapChannelPayload.asRcsMessage(rawIap)
+        // Accessory-initiated, so it carries `cmnd`: the phone's receive gate rejects `comm` on
+        // upload (ultra41: received messages 0 -> 9 by changing only that field). The payload
+        // itself still stays raw iAP2, which is what the rest of this test pins.
         assertEquals(
-            com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.MESSAGE_TYPE_COMM,
+            com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.MESSAGE_TYPE_CMND,
             message.messageType,
         )
         assertArrayEquals(rawIap, message.body)
-        assertArrayEquals(rawIap, IapChannelPayload.from(message))
+        // The two directions are not symmetric: an upload carries `cmnd`, but the phone's own
+        // iAPChannel carrier is `comm`, and that is what the receive-side check accepts.
+        assertArrayEquals(rawIap, IapChannelPayload.from(RcsMessage.comm(rawIap)))
     }
 
     @Test

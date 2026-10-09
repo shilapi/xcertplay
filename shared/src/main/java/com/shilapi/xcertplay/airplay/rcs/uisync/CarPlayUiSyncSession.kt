@@ -262,10 +262,26 @@ class CarPlayUiSyncHandlerFactory(
     private val commandPayloadDictionary: Boolean = false,
     private val omitFadeInNewLayout: Boolean = false,
     private val rcsBackpressureProbeBytes: Int = 0,
+    /** Diagnostic probe: one extra APTransport `sync` frame that the phone's transport should answer. */
+    private val transportSyncProbe: Boolean = false,
+    /**
+     * APTransport header form for every UI Sync frame we send. The default reproduces the historical
+     * `asyn`/`comm` shape; the other variants exist because the phone's receive gate accepts only
+     * the `cmnd`/`died` OSTypes. See [UiSyncUplinkVariant].
+     */
+    private val uplinkVariant: UiSyncUplinkVariant = UiSyncUplinkVariant.DEFAULT,
+    /**
+     * Diagnostic probe: this many minimal RESET carriers are sent on stream open, 300 ms apart,
+     * before the handshake. Any of them landing makes the phone's `RCS Summary` count a received
+     * message, which is the only read-out the phone exposes for "did the RCS layer accept our
+     * uplink at all". Zero disables the probe.
+     */
+    private val uplinkProbeFrames: Int = 0,
 ) : RcsDataStreamHandlerFactory {
     init {
         require(commandPayloadKey == "data" || commandPayloadKey == "payload")
         require(rcsBackpressureProbeBytes == 0 || rcsBackpressureProbeBytes in 1_048_577..2_097_152)
+        require(uplinkProbeFrames in 0..16)
     }
     override fun supports(clientType: RcsClientType) = clientType == RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL
     override fun create(stream: RcsDataStream): RcsDataStreamHandler? = if (supports(stream.clientType)) Handler(stream) else null
@@ -279,6 +295,7 @@ class CarPlayUiSyncHandlerFactory(
             val runtime: com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime?) {
             var layout = initialLayout
             var appearance = initialAppearance
+            private val syncProbeSent = java.util.concurrent.atomic.AtomicBoolean(false)
             val engine = CarPlayUiSyncSession(vehicleId,
                 send = ::sendMessage, trace = { stream.traceProtocol("$it displayUUID=${displayUuid ?: "reference"}") },
                 onCommand = { applyCommand(this, it) }, onReady = { initializeUi(this) },
@@ -294,10 +311,19 @@ class CarPlayUiSyncHandlerFactory(
                     commandPayloadDictionary = dictionary, omitFadeInNewLayout = omitFadeIn)
                 val fields = CarPlayUiSyncCarrier.wireFields(message, key, dictionary, omitFadeIn)
                 stream.traceProtocol("UI Sync TX state=${engine.state.wireName} displayUUID=${displayUuid ?: "reference"} carrier=plist " +
+                    "uplinkVariant=${uplinkVariant.wireName} " +
                     "commandPayloadKey=$key commandPayloadFormat=${if (dictionary) "dictionary" else "bplist"} " +
                     "message=${ProtocolTraceFormatter.pretty(fields)} body=${body.size}B bodyHex=${ProtocolTraceFormatter.hex(body)}")
-                val frame = RcsMessage.comm(body)
+                val frame = uplinkVariant.frame(body)
                 stream.send(frame)
+                if (transportSyncProbe && syncProbeSent.compareAndSet(false, true)) {
+                    // APTransport answers a sync package with an rply regardless of the business
+                    // handler, so an inbound "RCS transport reply" line proves the phone read this
+                    // socket at all. No reply only fails to prove it; it does not prove the opposite.
+                    stream.traceProtocol("RCS transport sync probe sent displayUUID=${displayUuid ?: "reference"} " +
+                        "body=${body.size}B awaitingTransportReply=true")
+                    stream.send(RcsMessage.sync(body))
+                }
                 if (message.type == CarPlayUiSyncMessageType.COMMAND && rcsBackpressureProbeBytes > 0 &&
                     probeStarted.compareAndSet(false, true)) Thread({
                     runCatching {
@@ -316,7 +342,12 @@ class CarPlayUiSyncHandlerFactory(
 
         override fun onStreamOpened(stream: RcsDataStream) {
             if (!deferInitialResetUntilPeer) sessions.getValue(primaryDisplayUuid).engine.start()
-            else stream.traceProtocol("UI Sync bootstrap waiting for configured display peer RESET to learn paired id; experimentalReadyTimeoutMillis=${peerResetReadyTimeoutMillis ?: "off"}")
+            else stream.traceProtocol("UI Sync bootstrap waiting for configured display peer RESET to learn paired id; " +
+                "experimentalReadyTimeoutMillis=${peerResetReadyTimeoutMillis ?: "off"} uplinkVariant=${uplinkVariant.wireName}")
+            if (uplinkProbeFrames > 0) scheduler.schedule({
+                runCatching { sendUplinkProbe(stream) }
+                    .onFailure { stream.traceProtocol("UI Sync uplink probe failed: ${it.message}") }
+            }, 0, TimeUnit.MILLISECONDS)
             scheduler.scheduleAtFixedRate({
                 runCatching { sessions.values.forEach { it.engine.tick() } }.onFailure { stream.traceProtocol("UI Sync retry failed: ${it.message}"); stream.fail(it) }
             }, 250, 250, TimeUnit.MILLISECONDS)
@@ -341,6 +372,31 @@ class CarPlayUiSyncHandlerFactory(
             sessions.values.forEach { it.engine.close(); it.runtime?.disconnect() }
             stream.traceProtocol("UI Sync closed cause=${cause?.message ?: "EOF"}")
         }
+        /**
+         * Fires [uplinkProbeFrames] minimal RESET carriers, 300 ms apart, as soon as the stream opens.
+         *
+         * The body is a RESET the peer can actually parse, so one accepted frame both raises the
+         * phone's `RCS Summary received messages` above zero and shows up as a `UI Sync RX` line
+         * here — a positive result on either side means the uplink reached the peer's RCS layer.
+         */
+        private fun sendUplinkProbe(stream: RcsDataStream) {
+            val probe = CarPlayUiSyncCarrier.encode(
+                CarPlayUiSyncMessageFactory.reset(1, 1, 0, version = CarPlayUiSyncProtocolVersion.V3),
+                primaryDisplayUuid)
+            val frame = uplinkVariant.frame(probe)
+            repeat(uplinkProbeFrames) { index ->
+                scheduler.schedule({
+                    runCatching {
+                        stream.traceProtocol("RCS uplink probe ${index + 1}/$uplinkProbeFrames " +
+                            "displayUUID=${primaryDisplayUuid ?: "reference"} uplinkVariant=${uplinkVariant.wireName} " +
+                            "packageType=0x${frame.packageType.toString(16)} messageType=0x${frame.messageType.toString(16)} " +
+                            "body=${probe.size}B bodyHex=${ProtocolTraceFormatter.hex(probe)}")
+                        stream.send(frame)
+                    }.onFailure { stream.traceProtocol("RCS uplink probe ${index + 1}/$uplinkProbeFrames failed: ${it.message}") }
+                }, 300L * index, TimeUnit.MILLISECONDS)
+            }
+        }
+
         private fun initializeUi(target: DisplaySession) {
             val engine = target.engine
             target.runtime?.let { runtime ->

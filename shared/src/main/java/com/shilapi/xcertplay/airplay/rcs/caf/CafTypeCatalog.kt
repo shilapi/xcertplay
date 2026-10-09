@@ -69,6 +69,11 @@ object CafTypeCatalog {
         service("TemperatureLevel", 0x0000000011000015),
         service("SeatHeatingCooling", 0x0000000022000001),
         service("SeatFan", 0x0000000022000002),
+        // AutomakerRequestContent: the accessory the phone's request-content punch-through is
+        // driven from. IDs taken from the firmware tables (2026-10-10 extraction).
+        service("RequestContent", 0x0000000017000004),
+        service("RequestTemporaryContent", 0x000000001700000C),
+        service("DynamicContentElement", 0x000000001700000B),
 
         characteristic("Temperature", 0x000000003000001D),
         characteristic("TemperatureState", 0x000000003000001E),
@@ -87,6 +92,16 @@ object CafTypeCatalog {
         characteristic("TemperatureMinMaxLabel", 0x0000000031000032),
         characteristic("VehicleLayoutKey", 0x0000000036000065),
         characteristic("TemperatureUnit", 0x0000000046000005),
+        // AutomakerRequestContent.requestContent characteristics. The framework's
+        // -[CAFRequestContent onCharacteristic]/…/displayZoneIdentifierCharacteristic] accessors
+        // accept CAFBoolCharacteristic for `On`/`UserDismissible` and CAFStringCharacteristic for
+        // the URL and identifier fields, so those are BOOL and STRING on the wire.
+        characteristic("On", 0x0000000030000002),
+        characteristic("ContentURL", 0x0000000030000007),
+        characteristic("UserDismissible", 0x0000000036000063),
+        characteristic("DisplayPanelIdentifier", 0x0000000037000007),
+        characteristic("DisplayZoneIdentifier", 0x000000003700000B),
+        characteristic("TemporaryContentURL", 0x0000000036000069),
 
         control("NULL", 0x0000000000000000),
         control("Play", 0x000000000F000032),

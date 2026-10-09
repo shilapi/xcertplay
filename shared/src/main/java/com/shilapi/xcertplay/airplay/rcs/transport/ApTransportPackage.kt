@@ -64,6 +64,18 @@ object ApTransportPackageCodec {
     const val MESSAGE_TYPE_OFFSET = 16
     const val BODY_OFFSET = 32
     const val MESSAGE_TYPE_COMM = 0x636f6d6d
+
+    /**
+     * OSType an accessory must use for RCS packages it sends to the phone.
+     *
+     * The phone's receive gate is `apEndpointRemoteControlSession_startMessageHandling`, whose
+     * first statement drops any package whose OSType is neither this nor `died`. `comm` is what the
+     * phone sends *down*; it never passes that gate, so an accessory that copies the phone's own
+     * value has every upload silently discarded — no log, no counter, no error. Measured in
+     * ultra41: the same nine frames moved the phone's `received messages` from 0 to 9 when only
+     * this field changed from `comm` to `cmnd`.
+     */
+    const val MESSAGE_TYPE_CMND = 0x636d6e64
     const val DEFAULT_MAX_PACKAGE_BYTES = 4 * 1024 * 1024
 
     /**
@@ -84,6 +96,45 @@ object ApTransportPackageCodec {
         uninterpretedHeader = uninterpretedHeader,
         maxPackageBytes = maxPackageBytes,
     )
+
+    /**
+     * Creates an asynchronous accessory-to-phone package carrying [MESSAGE_TYPE_CMND], the only
+     * OSType the phone's receive gate accepts for uploads. This is what every accessory-initiated
+     * RCS send must use; see [MESSAGE_TYPE_CMND] for why `comm` does not work.
+     */
+    fun uplink(
+        body: ByteArray,
+        uninterpretedHeader: ByteArray = ByteArray(0),
+        maxPackageBytes: Int = DEFAULT_MAX_PACKAGE_BYTES,
+    ): ApTransportPackage = create(
+        messageType = MESSAGE_TYPE_CMND,
+        body = body,
+        uninterpretedHeader = uninterpretedHeader,
+        maxPackageBytes = maxPackageBytes,
+    )
+
+    /**
+     * Creates a synchronous `comm` package: the peer's transport is expected to answer it with an
+     * `rply`. Only the diagnostic UI Sync probe uses this; the shipped accessory always sends
+     * asynchronous packages because the phone never answered a synchronous one in any capture.
+     */
+    fun sync(
+        body: ByteArray,
+        maxPackageBytes: Int = DEFAULT_MAX_PACKAGE_BYTES,
+    ): ApTransportPackage = create(
+        messageType = MESSAGE_TYPE_COMM,
+        body = body,
+        uninterpretedHeader = headerTemplate(PACKAGE_TYPE_SYNC),
+        maxPackageBytes = maxPackageBytes,
+    )
+
+    /**
+     * A zeroed 32-byte header carrying only [packageType]; group ID, reply token and reply status
+     * stay zero, which is what our streams use. Pass it as `uninterpretedHeader` to pin the package
+     * type of a frame that is not the default `asyn` one.
+     */
+    fun headerTemplate(packageType: Int): ByteArray =
+        ByteArray(HEADER_SIZE).also { putU32Be(it, PACKAGE_TYPE_OFFSET, packageType.toLong() and UINT32_MAX) }
 
     fun create(
         messageType: Int,

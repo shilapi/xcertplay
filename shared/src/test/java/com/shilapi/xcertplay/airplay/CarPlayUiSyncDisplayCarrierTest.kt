@@ -91,7 +91,7 @@ class CarPlayUiSyncDisplayCarrierTest {
                         assertFalse(received.message.toWireMap().containsKey("noAck"))
                     }
                 }
-                val commands = List(2) {
+                val commands = List(4) {
                     val body = phone.receiveNext(5_000)!!.body
                     val carrier = OpackCodec.decode(body) as Map<*, *>
                     val fields = (BplistCodec.decode(carrier["data"] as ByteArray) as Map<*, *>).toMutableMap()
@@ -103,11 +103,15 @@ class CarPlayUiSyncDisplayCarrierTest {
                     CarPlayUiSyncCarrier.decode(body)
                 }
                 assertEquals(setOf("Cluster_Display", "Center_Display"), commands.map { it.displayUuid }.toSet())
-                for (received in commands) {
-                    assertEquals(CarPlayUiSyncMessageType.COMMAND, received.message.type)
-                    assertEquals(3L, received.message.packetSequenceNumber)
-                    assertEquals(CarPlayUiSyncCommand.REQUEST_LAYOUT, received.message.commandPayload()!!.command)
-                    if (dictionary) assertFalse(received.message.commandPayload()!!.fields.containsKey("fadeInNewLayout"))
+                for (display in listOf("Cluster_Display", "Center_Display")) {
+                    val (layout, allow) = commands.filter { it.displayUuid == display }
+                    assertEquals(CarPlayUiSyncMessageType.COMMAND, layout.message.type)
+                    assertEquals(CarPlayUiSyncCommand.REQUEST_LAYOUT, layout.message.commandPayload()!!.command)
+                    assertEquals(3L, layout.message.packetSequenceNumber)
+                    if (dictionary) assertFalse(layout.message.commandPayload()!!.fields.containsKey("fadeInNewLayout"))
+                    assertEquals(CarPlayUiSyncCommand.ALLOW_TRANSITIONS, allow.message.commandPayload()!!.command)
+                    assertEquals(mapOf("allow" to true), allow.message.commandPayload()!!.fields)
+                    assertEquals(4L, allow.message.packetSequenceNumber)
                 }
             }
         } finally { stream.close(); root.deleteRecursively() }
@@ -144,6 +148,9 @@ class CarPlayUiSyncDisplayCarrierTest {
                 assertEquals(7L, answer.sessionSequenceNumber)
                 send("Center_Display", true, 7, 2, 1)
                 val centerLayout = receive("Center_Display").commandPayload()!!
+                val centerAllow = receive("Center_Display").commandPayload()!!
+                assertEquals(CarPlayUiSyncCommand.ALLOW_TRANSITIONS, centerAllow.command)
+                assertEquals(mapOf("allow" to true), centerAllow.fields)
                 val layouts = runtime.descriptor.center!!["layouts"] as List<*>
                 val primary = layouts.map { it as Map<*, *> }.single { it["layoutType"] == "primary" }
                 assertEquals(primary["id"], centerLayout.fields["layoutID"])
@@ -170,6 +177,8 @@ class CarPlayUiSyncDisplayCarrierTest {
                 send("Cluster_Display", true, 1, 2, 1)
                 assertEquals(runtime.descriptor.initialLayout,
                     receive("Cluster_Display").commandPayload()!!.fields["layoutID"])
+                assertEquals(CarPlayUiSyncCommand.ALLOW_TRANSITIONS,
+                    receive("Cluster_Display").commandPayload()!!.command)
                 assertTrue(runtime.scene.uiConnected)
                 send("Center_Display", false, 8, 1, 0)
                 assertEquals(8L, receive("Center_Display").sessionSequenceNumber)
@@ -242,6 +251,13 @@ class CarPlayUiSyncDisplayCarrierTest {
                 assertEquals(runtime.descriptor.initialLayout, (layout["data"] as Map<*, *>)["layoutID"])
                 if (commandPayloadKey == "payload") assertTrue((layout["data"] as Map<*, *>).containsKey("fadeInNewLayout"))
                 assertTrue(runtime.scene.uiConnected)
+                // Workspace.lua sends ALLOW_LAYOUT_CHANGE (0x11) right after the layout request.
+                val allow = receive()
+                assertEquals(2L, allow["type"])
+                assertEquals(4L, allow["psn"])
+                val allowCommand = BplistCodec.decode(allow["data"] as ByteArray) as Map<*, *>
+                assertEquals(0x11L, allowCommand["type"])
+                assertEquals(mapOf("allow" to true), allowCommand["data"])
                 val layoutFields = layout["data"] as Map<*, *>
                 fun command(psn: Long, type: Long, fields: Map<*, *>) = send(mapOf(
                     "type" to 2L, "ssn" to 1L, "psn" to psn, "asn" to 2L,

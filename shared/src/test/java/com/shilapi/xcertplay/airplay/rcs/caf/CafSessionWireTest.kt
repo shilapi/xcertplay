@@ -50,7 +50,9 @@ class CafSessionWireTest {
                         plaintext += decrypted.data
                     }
                     assertArrayEquals(ApTransportPackageTest.hex("6173796e"), plaintext.copyOfRange(4, 8))
-                    assertArrayEquals(ApTransportPackageTest.hex("636f6d6d"), plaintext.copyOfRange(16, 20))
+                    // `cmnd`, not `comm`: this is accessory-initiated traffic and the phone's
+                    // receive gate only accepts `cmnd` on upload (ultra41, received messages 0 -> 9).
+                    assertArrayEquals(ApTransportPackageTest.hex("636d6e64"), plaintext.copyOfRange(16, 20))
                     assertArrayEquals(ByteArray(8), plaintext.copyOfRange(8, 16))
                     assertArrayEquals(ByteArray(12), plaintext.copyOfRange(20, 32))
                     val size = ByteBuffer.wrap(plaintext).int

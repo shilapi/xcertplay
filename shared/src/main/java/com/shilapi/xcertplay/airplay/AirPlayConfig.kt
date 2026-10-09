@@ -236,6 +236,13 @@ data class AirPlayUltraConfig(
     val clusterDisplayPluginId: String? = null,
     /** Center_Display plugin UID; binds the main stream to the asset's centerConsole display. */
     val centerDisplayPluginId: String? = null,
+    /**
+     * Diagnostic A/B: when false the `/info` response omits the cluster display and its
+     * `displayPanels`, so the phone never sees a DDP display it has no asset layout for.
+     * Flipped from the on-device profile key `ultraDeclareClusterDisplay`. Default keeps the
+     * shipping behaviour.
+     */
+    val declareClusterDisplay: Boolean = true,
 )
 
 /** Immutable accessory configuration consumed by the AirPlay session server. */

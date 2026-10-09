@@ -77,6 +77,39 @@ class CafFirmwareContractTest {
         }
     }
 
+    @Test fun requestContentDeclarationIsOptInAndUsesFirmwareTypeIds() {
+        // Disarmed, the reference tree carries no AutomakerRequestContent accessory.
+        assertTrue(Ios27CafWireContract.children(referenceConfig(), "accessories")
+            .none { it["type"] == 0x01200001L })
+
+        val armed = (CarPlayUltraVehicleProvisioning.create(profile = mapOf(
+            "ultraDeclareRequestContent" to true,
+            "requestContentPanelIdentifier" to "cluster.0",
+        )).pluginRegistrations.single().handler as CafVehicleStatePlugin).config
+
+        val accessory = Ios27CafWireContract.children(armed, "accessories")
+            .single { it["type"] == 0x01200001L }
+        val services = Ios27CafWireContract.children(accessory, "services")
+        assertEquals(listOf(0x17000004L, 0x17000004L), services.map { (it["type"] as Number).toLong() })
+        val characteristics = services.flatMap { Ios27CafWireContract.children(it, "characteristics") }
+        fun of(type: Long) = characteristics.filter { (it["type"] as Number).toLong() == type }
+        // 24A437 keys the phone-side punch-through on the literal zone name and a string panel id,
+        // and accepts only CAFBoolCharacteristic for On/UserDismissible (bool) and
+        // CAFStringCharacteristic for the URL/identifier fields (string).
+        assertEquals(listOf("zone1", "zone2"), of(0x3700000BL).map { it["initialValue"] })
+        assertEquals(listOf("cluster.0", "cluster.0"), of(0x37000007L).map { it["initialValue"] })
+        assertEquals(listOf(0L, 0L), of(0x30000002L).map { it["format"] })
+        assertEquals(listOf(10L, 10L), of(0x30000007L).map { it["format"] })
+        assertEquals(listOf(0L, 0L), of(0x36000063L).map { it["format"] })
+        Ios27CafWireContract.assertIdentifiers(armed)
+    }
+
+    @Test fun requestContentDeclarationRequiresAPanelIdentifier() {
+        assertThrows(IllegalStateException::class.java) {
+            CarPlayUltraVehicleProvisioning.create(profile = mapOf("ultraDeclareRequestContent" to true))
+        }
+    }
+
     private fun numericCharacteristic() = linkedMapOf<String, Any?>(
         "type" to 0x31000019L, "iid" to 101L, "format" to 9L,
         "initialValue" to 0L, "writable" to false,
@@ -89,7 +122,7 @@ class CafFirmwareContractTest {
 
 /** Deliberately inspects the raw dictionary; never calls CafConfigTree.decode or the factory. */
 internal object Ios27CafWireContract {
-    private fun children(node: Map<*, *>, key: String) =
+    fun children(node: Map<*, *>, key: String) =
         (node[key] as? List<*>)?.map { it as Map<*, *> }.orEmpty()
 
     fun characteristics(tree: Map<*, *>) = children(tree, "accessories")

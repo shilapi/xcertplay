@@ -37,11 +37,12 @@ object AirPlayInfoPlist {
         require(capabilities.supportedFeatureSet.containsAll(responseFeatures)) {
             "/info cannot describe features unsupported by this receiver"
         }
+        val clusterDisplay = config.ultra?.takeIf { it.declareClusterDisplay }?.cluster
         val displays = arrayListOf<Map<String, Any?>>(
             AirPlayDisplayDescriptionFactory.create(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
         )
         if (AirPlayFeature.ALT_SCREEN in responseFeatures) {
-            config.ultra?.cluster?.let {
+            clusterDisplay?.let {
                 displays.add(AirPlayDisplayDescriptionFactory.create(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
             }
         }
@@ -72,7 +73,8 @@ object AirPlayInfoPlist {
         info["displays"] = displays
         // DDP is a physical display/plugin relationship, not displays[].features bit 3.
         // Keep it out of classic and partial negotiations, including an unaccepted alternate stream.
-        if (AirPlayFeature.UI_SYNC in responseFeatures && AirPlayFeature.ALT_SCREEN in responseFeatures) {
+        if (AirPlayFeature.UI_SYNC in responseFeatures && AirPlayFeature.ALT_SCREEN in responseFeatures &&
+            clusterDisplay != null) {
             config.ultra?.clusterDisplayPluginId?.let { pluginId ->
                 info["displayPanels"] = AirPlayDisplayDescriptionFactory.createPanels(
                     displays.first(), displays[1], pluginId, config.ultra?.centerDisplayPluginId,
@@ -81,7 +83,7 @@ object AirPlayInfoPlist {
         }
         if (AirPlayFeature.UI_CONTEXT in responseFeatures) {
             info["uiContextLastOnDisplayURLs"] = emptyList<String>()
-            info["uiContextNowOnDisplayURLs"] = listOfNotNull(config.main.initialUrl, config.ultra?.cluster?.initialUrl)
+            info["uiContextNowOnDisplayURLs"] = listOfNotNull(config.main.initialUrl, clusterDisplay?.initialUrl)
         }
         info["hidDevices"] = listOf(
             AirPlayHid.touchHidDevice(config.main.widthPixels, config.main.heightPixels, MAIN_UUID),

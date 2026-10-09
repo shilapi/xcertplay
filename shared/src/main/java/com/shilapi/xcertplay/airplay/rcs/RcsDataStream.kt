@@ -198,7 +198,12 @@ class RcsDataStream private constructor(
                 val message = acceptedChannel.receiveNext(RECEIVE_POLL_MILLIS)
                 if (message != null) {
                     if (message.packageType == com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageCodec.PACKAGE_TYPE_REPLY) {
-                        trace("RCS transport reply received without pending synchronous request")
+                        // Only a synchronous probe send can be answered here; nothing else requests one.
+                        trace(
+                            "RCS transport reply received token=0x${message.replyToken?.toString(16) ?: "none"} " +
+                                "status=${message.replyStatus ?: -1} body=${message.body.size}B " +
+                                "clientType=${clientType.name}",
+                        )
                     } else dispatch(message)
                     continue
                 }

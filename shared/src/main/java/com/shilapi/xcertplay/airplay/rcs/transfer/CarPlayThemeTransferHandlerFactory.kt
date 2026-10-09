@@ -36,14 +36,14 @@ class CarPlayThemeTransferHandlerFactory(
         override fun onStreamOpened(stream: RcsDataStream) {
             stream.traceProtocol("Theme file transfer opened encoding=OPACK storage=disk")
             scheduler.scheduleAtFixedRate({
-                runCatching { receiver.expire()?.let { stream.send(RcsMessage.comm(it)) } }
+                runCatching { receiver.expire()?.let { stream.send(RcsMessage.uplink(it)) } }
                     .onFailure { stream.traceProtocol("Theme timeout failed: ${it.message}"); stream.close() }
             }, 1, 1, TimeUnit.SECONDS)
         }
 
         override fun onMessage(stream: RcsDataStream, message: RcsMessage) {
             require(message.messageType == ApTransportPackageCodec.MESSAGE_TYPE_COMM) { "Invalid theme file carrier" }
-            receiver.receive(message.body)?.let { stream.send(RcsMessage.comm(it)) }
+            receiver.receive(message.body)?.let { stream.send(RcsMessage.uplink(it)) }
         }
 
         override fun onStreamClosed(stream: RcsDataStream, cause: Throwable?) {

@@ -34,7 +34,7 @@ class CarPlayOemLocalThemeTest {
         assertEquals(digiRing, runtime.scene.layoutId)
         assertEquals("orange", runtime.scene.paletteId)
 
-        val data = runtime.initialCommands().single().toWireMap()["data"] as Map<*, *>
+        val data = runtime.initialCommands().first().toWireMap()["data"] as Map<*, *>
         assertEquals(digiRing, data["layoutID"])
         assertEquals("orange", data["paletteID"])
         assertEquals(runtime.descriptor.initialComponents(digiRing), data["activeComponents"])

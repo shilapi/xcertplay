@@ -32,6 +32,29 @@ class ApTransportPackageTest {
         assertArrayEquals(hex("0000002073796e630102030405060708636f6d6d1112131415161718ffffffce"), header)
     }
 
+    @Test
+    fun outboundSyncProbeOnlyChangesThePackageType() {
+        val body = byteArrayOf(1, 2, 3)
+        val expected = hex("0000002373796e630000000000000000636f6d6d000000000000000000000000010203")
+        assertArrayEquals(expected, RcsMessage.sync(body).encoded())
+        assertArrayEquals(expected, ApTransportPackageCodec.sync(body).encoded())
+        assertEquals(ApTransportPackageCodec.PACKAGE_TYPE_SYNC,
+            RcsMessage.sync(body).packageType)
+    }
+
+    @Test
+    fun replyCorrelationMetadataIsOnlyExposedForReplyPackages() {
+        val header = hex("0000002073796e630000000000000000636f6d6d1122334455667788ffffffce")
+        val request = ApTransportPackageCodec.create(
+            ApTransportPackageCodec.MESSAGE_TYPE_COMM, byteArrayOf(1, 2, 3), header)
+        val reply = RcsMessage.fromPackage(ApTransportPackageCodec.reply(request, status = 7))
+        assertEquals(ApTransportPackageCodec.PACKAGE_TYPE_REPLY, reply.packageType)
+        assertEquals(0x1122334455667788L, reply.replyToken)
+        assertEquals(7, reply.replyStatus)
+        assertNull(RcsMessage.comm(byteArrayOf(1, 2, 3)).replyToken)
+        assertNull(RcsMessage.sync(byteArrayOf(1, 2, 3)).replyStatus)
+    }
+
     companion object {
         // ultra5.log line 755: complete decrypted APTransport packet from the phone.
         const val ULTRA5_CONFIG_REQUEST =

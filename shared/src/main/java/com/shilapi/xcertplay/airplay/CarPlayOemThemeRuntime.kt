@@ -75,7 +75,9 @@ class CarPlayOemThemeDescriptor private constructor(private val values: Map<Stri
         val relative = dictionary(resources[identifier])["path"] as? String
             ?: throw IllegalArgumentException("Unknown OEM resource $identifier")
         require(!relative.startsWith('/') && '\\' !in relative && relative.split('/').none { it == ".." || it == "." })
-        return "r/Cluster_Display/$relative"
+        // The archive carries one resource tree per display (r/Cluster_Display/, r/Center_Display/);
+        // a Center runtime must not resolve under the cluster tree.
+        return "r/$displayId/$relative"
     }
 
     /** Wire SDK follows the selected asset requirement. The verified bundled package is advertised as applied. */
@@ -190,7 +192,11 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     @Synchronized fun initialCommands(): List<CarPlayUiSyncCommandPayload> {
         check(loaded) { "OEM theme must load before UI Sync ready" }
         publish(scene.copy(uiConnected = true, layoutConfirmed = false, paletteId = scene.paletteId ?: descriptor.palette(scene.layoutId)))
-        return listOf(requestLayout(scene.layoutId))
+        // The verified asset sends allowLayoutChange(true) on every UI Sync connect, in both the
+        // remote-UI-visible branch (after REQUEST_LAYOUT) and the hidden branch (before
+        // REQUEST_APPEARANCE). Without it the phone holds the layout locked and streams a
+        // placeholder frame. Workspace.lua:570,576; LayoutController.lua:654.
+        return listOf(requestLayout(scene.layoutId), allowLayoutChange(true))
     }
 
     @Synchronized fun selectInitialLayout(id: String) { descriptor.layout(id); publish(scene.copy(layoutId = id)) }
@@ -214,6 +220,10 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         mapOf("layoutID" to id, "paletteID" to (scene.paletteId ?: descriptor.palette(id)), "appearanceMode" to scene.appearance.toLong(),
             "fadeInNewLayout" to true, "fadeOutOldLayout" to true,
             "activeComponents" to descriptor.initialComponents(id)), assetWire = true)
+
+    /** ALLOW_LAYOUT_CHANGE (0x11) with the asset's `data.allow` field. LayoutController.lua:654. */
+    private fun allowLayoutChange(allow: Boolean) = CarPlayUiSyncCommandPayload(
+        CarPlayUiSyncCommand.ALLOW_TRANSITIONS, mapOf("allow" to allow), assetWire = true)
 
     @Synchronized fun handle(command: CarPlayUiSyncCommandPayload): List<CarPlayUiSyncCommandPayload> {
         check(loaded && command.assetWire) { "OEM runtime requires loaded theme and numeric commands" }

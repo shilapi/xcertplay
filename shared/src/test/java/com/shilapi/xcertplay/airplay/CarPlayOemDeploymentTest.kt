@@ -39,7 +39,14 @@ class CarPlayOemDeploymentTest {
     }
 
     @Test fun requestUsesZoneToPrimaryComponentDictionary() = deployed { runtime ->
-        val request = runtime.initialCommands().single().toWireMap()
+        val commands = runtime.initialCommands()
+        // REQUEST_LAYOUT (0x05) then ALLOW_LAYOUT_CHANGE (0x11 {allow:true}); the asset's
+        // Workspace.lua sends the latter on every UI Sync connect.
+        assertEquals(2, commands.size)
+        val allow = commands[1].toWireMap()
+        assertEquals(0x11L, allow["type"])
+        assertEquals(mapOf("allow" to true), allow["data"])
+        val request = commands.first().toWireMap()
         assertEquals(5L, request["type"])
         val data = request["data"] as Map<*, *>
         assertEquals("6C45CC47-EC01-527A-B40D-1316AA9C936F", data["layoutID"])
@@ -229,6 +236,13 @@ class CarPlayOemDeploymentTest {
                 assertEquals(5L, inner["type"])
                 val request = inner["data"] as Map<*, *>
                 assertTrue(request["activeComponents"] is Map<*, *>)
+                // Workspace.lua follows the layout request with ALLOW_LAYOUT_CHANGE (0x11).
+                val allowEnvelope = receive()
+                assertEquals(2L, allowEnvelope["type"])
+                assertEquals(4L, allowEnvelope["psn"])
+                val allowInner = BplistCodec.decode(allowEnvelope["data"] as ByteArray) as Map<*, *>
+                assertEquals(0x11L, allowInner["type"])
+                assertEquals(mapOf("allow" to true), allowInner["data"])
                 send(BplistCodec.encode(mapOf("type" to 2L, "ssn" to 1L, "psn" to 3L,
                     "asn" to 2L, "data" to BplistCodec.encode(mapOf("type" to 9L,
                         "data" to mapOf("isTransitioning" to true))))))

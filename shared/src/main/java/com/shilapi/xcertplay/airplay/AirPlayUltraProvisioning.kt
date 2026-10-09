@@ -26,6 +26,8 @@ data class AirPlayUltraProvisioning(
     val clusterAsset: com.shilapi.xcertplay.iap2.message.Iap2ClusterAsset? = null,
     val clusterDisplayPluginId: String? = null,
     val centerDisplayPluginId: String? = null,
+    /** Diagnostic A/B; see [AirPlayUltraConfig.declareClusterDisplay]. */
+    val declareClusterDisplay: Boolean = true,
 ) {
     init {
         sidecars.keys.forEach { feature ->
@@ -100,6 +102,7 @@ data class AirPlayUltraProvisioning(
             clusterAsset = clusterAsset,
             clusterDisplayPluginId = clusterDisplayPluginId,
             centerDisplayPluginId = centerDisplayPluginId,
+            declareClusterDisplay = declareClusterDisplay,
         )
     }
 

@@ -21,6 +21,15 @@ data class RcsMessage(
 ) {
     val packageType: Int get() = if (transportHeader.isEmpty()) ApTransportPackageCodec.PACKAGE_TYPE_ASYNC
         else ApTransportPackageCodec.readPackageType(transportHeader)
+
+    /** Correlation token of an `rply`, or null for every other package type. */
+    val replyToken: Long? get() = if (packageType == ApTransportPackageCodec.PACKAGE_TYPE_REPLY)
+        ApTransportPackageCodec.readU64Be(transportHeader, 20) else null
+
+    /** APTransport reply status of an `rply`, or null for every other package type. */
+    val replyStatus: Int? get() = if (packageType == ApTransportPackageCodec.PACKAGE_TYPE_REPLY)
+        ApTransportPackageCodec.readU32Be(transportHeader, 28).toInt() else null
+
     fun encoded(): ByteArray = ApTransportPackageCodec.create(messageType, body, transportHeader).encoded()
     fun transportReply(status: Int = 0): RcsMessage = fromPackage(ApTransportPackageCodec.reply(
         ApTransportPackageCodec.create(messageType, body, transportHeader), status))
@@ -29,8 +38,24 @@ data class RcsMessage(
         fun fromPackage(value: ApTransportPackage): RcsMessage =
             RcsMessage(value.messageType, value.body, value.headerBytes())
 
+        /**
+         * Carrier for a package the phone sends down. Tests that play the phone side use this too.
+         * Anything the accessory initiates must use [uplink] instead: the phone's receive gate
+         * rejects `comm` on upload.
+         */
         fun comm(body: ByteArray): RcsMessage =
             RcsMessage(ApTransportPackageCodec.MESSAGE_TYPE_COMM, body)
+
+        /**
+         * Carrier for a package the accessory sends to the phone. The phone accepts only
+         * [ApTransportPackageCodec.MESSAGE_TYPE_CMND] on upload; see that constant for the evidence.
+         */
+        fun uplink(body: ByteArray): RcsMessage =
+            RcsMessage(ApTransportPackageCodec.MESSAGE_TYPE_CMND, body)
+
+        /** Diagnostic probe only; see [ApTransportPackageCodec.sync]. */
+        fun sync(body: ByteArray): RcsMessage =
+            fromPackage(ApTransportPackageCodec.sync(body))
     }
 }
 
@@ -94,6 +119,11 @@ class RcsChannel private constructor(
 
     fun sendComm(body: ByteArray) {
         send(RcsMessage.comm(body))
+    }
+
+    /** Diagnostic probe send: the peer's APTransport is expected to answer with an `rply`. */
+    fun sendSync(body: ByteArray) {
+        send(RcsMessage.sync(body))
     }
 
     /**

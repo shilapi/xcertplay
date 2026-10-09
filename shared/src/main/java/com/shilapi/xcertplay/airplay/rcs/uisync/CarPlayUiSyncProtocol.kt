@@ -189,7 +189,7 @@ data class CarPlayUiSyncMessage(
 
     fun toBplist(): ByteArray = BplistCodec.encode(toWireMap())
 
-    fun toRcsMessage(): RcsMessage = RcsMessage.comm(toBplist())
+    fun toRcsMessage(): RcsMessage = RcsMessage.uplink(toBplist())
 
     fun commandPayload(): CarPlayUiSyncCommandPayload? {
         if (type != CarPlayUiSyncMessageType.COMMAND || payload == null) return null
