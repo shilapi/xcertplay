@@ -622,6 +622,10 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        CarPlayBackgroundSession.audioFocus(this).apply {
+            retain(this@CarPlayHostActivity)
+            requestFromHost()
+        }
         locationPermissionAvailable = hasFineLocationPermission()
         if (locationReportingEnabled && !locationPermissionAvailable && !menuOpen) {
             requestLocationPermission()
@@ -658,6 +662,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        CarPlayBackgroundSession.audioFocus(this).release(this)
         stopMicrophoneGainTest()
         mainHandler.removeCallbacks(applyDisplaySize)
         clusterPreviewSurface?.let { detachSurface(SCREEN_TYPE_ALT, it); it.release() }
@@ -3535,6 +3540,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 mediaMetricsMonitor = mediaMetricsMonitor,
                 onClosed = { outputs?.close() },
                 mediaTap = outputs,
+                audioFocus = CarPlayBackgroundSession.audioFocus(this),
                 onScreenStreamActiveChanged = { type, active ->
                     onScreenStreamStateChanged(controllerGeneration, type, active)
                 },
@@ -4414,6 +4420,11 @@ class CarPlayHostActivity : ComponentActivity() {
 /** Process-local hand-off for keeping the CarPlay session alive while no Activity is visible. */
 private object CarPlayBackgroundSession {
     val log = SessionLog()
+    private var audioFocusSession: AndroidMediaSink.AudioFocusSession? = null
+
+    @Synchronized
+    fun audioFocus(context: android.content.Context): AndroidMediaSink.AudioFocusSession =
+        audioFocusSession ?: AndroidMediaSink.createAudioFocus(context).also { audioFocusSession = it }
 
     data class Snapshot(
         val controller: CarPlayController,

@@ -2,6 +2,8 @@ package com.shilapi.xcertplay.media
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioTimestamp
 import android.media.AudioTrack
@@ -10,6 +12,8 @@ import android.media.MediaCodecList
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
@@ -42,6 +46,7 @@ class AndroidMediaSink(
     private val videoSizes: Map<Int, Pair<Int, Int>> = emptyMap(),
     private val mediaTap: MediaTap? = null,
     private val onClosed: () -> Unit = {},
+    private val audioFocus: AudioFocusSession? = null,
 ) : MediaSink {
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val defaultSurface = surface
@@ -55,6 +60,10 @@ class AndroidMediaSink(
     private val videoConfigs = ConcurrentHashMap<Int, Pair<VideoCodec, ByteArray>>()
     private val previewLock = Any()
     @Volatile private var mediaMetricsMonitor = mediaMetricsMonitor
+
+    init {
+        audioFocus?.retain(this)
+    }
 
     fun setSurface(type: Int, surface: Surface) {
         surfaces[type] = surface
@@ -176,6 +185,7 @@ class AndroidMediaSink(
         audioRenderers.clear()
         microphoneUplinks.values.forEach(MicrophoneUplink::close)
         microphoneUplinks.clear()
+        audioFocus?.release(this)
         onClosed()
     }
 
@@ -205,6 +215,76 @@ class AndroidMediaSink(
             mediaTap,
         ).also {
             audioRenderers[type] = it
+        }
+    }
+
+    companion object {
+        fun createAudioFocus(context: Context): AudioFocusSession = AudioFocusSession(
+            context.applicationContext.getSystemService(AudioManager::class.java),
+        )
+    }
+
+    /** Shared by the visible host and the background media pipeline. */
+    class AudioFocusSession internal constructor(private val manager: AudioManager) {
+        private val owners = mutableSetOf<Any>()
+        private var requested = false
+        private var hasFocus = false
+        private val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .setAcceptsDelayedFocusGain(true)
+            .setWillPauseWhenDucked(true)
+            .setOnAudioFocusChangeListener(::onFocusChanged, Handler(Looper.getMainLooper()))
+            .build()
+
+        @Synchronized
+        fun retain(owner: Any) {
+            owners.add(owner)
+        }
+
+        /** Called only when the user enters the host, never by arriving audio packets. */
+        @Synchronized
+        fun requestFromHost() {
+            if (owners.isEmpty() || hasFocus) return
+            val result = manager.requestAudioFocus(request)
+            requested = result != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+            hasFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            Log.i(TAG, "audio focus request result=$result")
+        }
+
+        @Synchronized
+        fun release(owner: Any) {
+            owners.remove(owner)
+            if (owners.isNotEmpty()) return
+            manager.abandonAudioFocusRequest(request)
+            requested = false
+            hasFocus = false
+            Log.i(TAG, "audio focus released")
+        }
+
+        @Synchronized
+        private fun onFocusChanged(change: Int) {
+            if (owners.isEmpty() || !requested) return
+            when (change) {
+                AudioManager.AUDIOFOCUS_GAIN -> hasFocus = true
+                AudioManager.AUDIOFOCUS_LOSS -> {
+                    requested = false
+                    hasFocus = false
+                }
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+                -> hasFocus = false
+            }
+            // Focus tracks ownership only; the phone's audio keeps flowing at its normal volume.
+            Log.i(TAG, "audio focus change=$change hasFocus=$hasFocus")
+        }
+
+        private companion object {
+            const val TAG = "xcertplay-usb"
         }
     }
 }
