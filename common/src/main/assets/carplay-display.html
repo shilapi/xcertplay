@@ -4,100 +4,378 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>xcertplay</title>
 <style>
-:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#080808;color:#eee}*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column}header{display:flex;align-items:center;gap:16px;padding:12px 20px;background:#161419}h1{font-size:17px;margin:0;font-weight:600}#status{font-size:13px;color:#aaa;flex:1}button{background:#a67df2;color:#100b18;border:0;border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}main{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;touch-action:none}img{width:100%;height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}img[hidden]{display:none}#waiting{position:absolute;color:#aaa;text-align:center;padding:24px;pointer-events:none}.stale{opacity:.4}:fullscreen header{display:none}
+:root{color-scheme:dark;font-family:system-ui,-apple-system,"Roboto",sans-serif;background:#000;color:#f7f8ff;--secondary:rgba(247,248,255,.54);--separator:rgba(247,248,255,.13);--accent:#9275d7}*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column}header{display:flex;align-items:center;gap:12px;padding:10px 12px 10px 18px;background:#0f0f0f;border-bottom:1px solid var(--separator)}#dot{width:8px;height:8px;border-radius:50%;background:#333;flex:none;transition:background .2s}#dot.live{background:var(--accent)}h1{font-size:15px;margin:0;font-weight:500;white-space:nowrap}#status{font-size:13px;color:var(--secondary);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}button{background:#403a59;color:#f7f8ff;border:0;border-radius:10px;padding:8px 14px;font:inherit;font-size:13px;font-weight:500;cursor:pointer}button:active{background:#4d466b}main{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}canvas,video{width:100%;height:100%;object-fit:contain;pointer-events:none}canvas[hidden],video[hidden]{display:none}#waiting{position:absolute;color:var(--secondary);font-size:14px;text-align:center;padding:24px;pointer-events:none}#waiting[hidden]{display:none}:fullscreen header{display:none}
 </style>
-<header><h1 id="title">xcertplay</h1><span id="status">Connecting…</span><button id="fullscreen">Full screen</button></header>
-<main id="surface"><img id="screen" alt="CarPlay display" hidden draggable="false"><div id="waiting">Waiting for CarPlay</div></main>
+<header><span id="dot"></span><h1 id="title">xcertplay</h1><span id="status">Connecting…</span><button id="fullscreen">Full screen</button></header>
+<main id="surface"><canvas id="canvas" hidden></canvas><video id="video" hidden muted playsinline autoplay disablepictureinpicture disableremoteplayback></video><div id="waiting">Waiting for CarPlay</div></main>
 <script>
 'use strict';
-const surface=document.getElementById('surface'),screen=document.getElementById('screen'),status=document.getElementById('status'),waiting=document.getElementById('waiting');
+// The phone forwards CarPlay's own H.264/H.265 stream; this page decodes it with WebCodecs, or through
+// Media Source Extensions where WebCodecs cannot. The main display also plays CarPlay's audio.
+const $=id=>document.getElementById(id);
+const surface=$('surface'),canvas=$('canvas'),video=$('video'),statusText=$('status'),waiting=$('waiting'),dot=$('dot');
 const route=location.pathname.replace(/\/$/,''),key=new URLSearchParams(location.search).get('key')||'',main=route==='/main';
-document.getElementById('title').textContent=main?'xcertplay · Main display':'xcertplay · Instrument display';
-const client=Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('');
-let sequence=0,imageUrl=null,live=false,width=0,height=0,generation=0;
+$('title').textContent=main?'Main display':'Instrument display';
+const stream={active:false,width:0,height:0,control:false};
+let socket=null,connection=0,retry=0,stopped=false,notice='',noticeUntil=0;
+
+// ---- connection --------------------------------------------------------------------------------
+function send(text){if(socket?.readyState!==WebSocket.OPEN)return false;socket.send(text);return true;}
+function connect(){
+  if(stopped||socket)return;
+  const token=++connection,url=new URL(`${route}/ws`,location.href);
+  url.protocol='wss:';url.searchParams.set('key',key);
+  const ws=new WebSocket(url);ws.binaryType='arraybuffer';socket=ws;let opened=false;
+  ws.onopen=()=>{opened=true;retry=0;render();};
+  ws.onmessage=event=>{if(token===connection)receive(event.data);};
+  ws.onclose=()=>{
+    if(token!==connection)return;
+    socket=null;pointers.clear();setStream({active:false});
+    if(!opened)fetch(location.href,{cache:'no-store'}).then(r=>{if(r.status===401){stopped=true;render('Display address has changed');}}).catch(()=>{});
+    setTimeout(connect,Math.min(5000,250*2**retry++));render();
+  };
+}
+function receive(data){
+  if(typeof data==='string'){
+    const message=JSON.parse(data);
+    if(message.type==='state')setStream(message);
+    else if(message.type==='busy')flash('Another browser is controlling CarPlay');
+    return;
+  }
+  const bytes=new Uint8Array(data);
+  switch(bytes[0]){
+    case 1:videoOut.configure(bytes[1]===1?'h265':'h264',bytes.slice(2));break;
+    case 2:videoOut.decode(bytes.subarray(10),(bytes[1]&1)===1,Number(new DataView(data).getBigUint64(2)));break;
+    case 3:audio.play(bytes[1],new DataView(data).getUint32(2),bytes[6],data);break;
+    case 4:audio.stop(bytes[1]);break;
+  }
+}
+function setStream(next){
+  Object.assign(stream,next);
+  if(!stream.active){videoOut.reset();audio.reset();}
+  render();
+}
+function flash(text){notice=text;noticeUntil=performance.now()+2500;render();}
+function render(text){
+  if(text)notice=text,noticeUntil=Infinity;
+  const live=stream.active&&videoOut.shown;
+  waiting.hidden=live;dot.classList.toggle('live',live);
+  waiting.textContent=videoOut.error||'Waiting for CarPlay';
+  if(performance.now()<noticeUntil){statusText.textContent=notice;return;}
+  if(!socket||socket.readyState!==WebSocket.OPEN)statusText.textContent=stopped?notice:'Reconnecting…';
+  else if(!stream.active)statusText.textContent='Waiting for CarPlay';
+  else if(audio.context&&!audio.running())statusText.textContent='Tap the screen to turn on sound';
+  else statusText.textContent=[`${stream.width} × ${stream.height}`,videoOut.label,`${videoOut.fps} fps`].filter(Boolean).join(' · ');
+}
+setInterval(()=>send('p'),2000);
+
+// ---- video -------------------------------------------------------------------------------------
+function codecString(codec,d){
+  const hex=n=>n.toString(16).padStart(2,'0');
+  if(codec==='h264')return d.length>3?`avc1.${hex(d[1])}${hex(d[2])}${hex(d[3])}`:'avc1.42e01f';
+  if(d.length<13)return 'hvc1.1.6.L93.B0';
+  let compat=((d[2]<<24)|(d[3]<<16)|(d[4]<<8)|d[5])>>>0,reversed=0;
+  for(let i=0;i<32;i++){reversed=(reversed<<1)|(compat&1);compat>>>=1;}
+  const constraints=[...d.slice(6,12)];
+  while(constraints.length&&!constraints[constraints.length-1])constraints.pop();
+  return ['hvc1',['','A','B','C'][d[1]>>6]+(d[1]&31),(reversed>>>0).toString(16),((d[1]>>5)&1?'H':'L')+d[12],
+    ...constraints.map(n=>n.toString(16).toUpperCase())].join('.');
+}
+const videoOut={
+  decoder:null,config:null,pending:null,generation:0,shown:false,fps:0,frames:0,error:'',label:'',failures:0,failedAt:0,
+  async configure(codec,description){
+    const same=this.config&&this.config.codec===codec&&this.config.description.length===description.length&&
+      this.config.description.every((b,i)=>b===description[i]);
+    if(same&&(this.decoder||this.pending))return;
+    const token=++this.generation;this.close();
+    this.config={codec,description,string:codecString(codec,description)};this.pending=[];this.error='';
+    let decoder=null;
+    try{decoder=await webCodecsDecoder(this.config)||await mseDecoder(this.config);}
+    catch(error){console.warn(error);}
+    if(token!==this.generation){decoder?.close();return;}
+    if(!decoder){
+      this.pending=null;
+      this.error=`This browser cannot decode ${codec==='h265'?'H.265 (HEVC)':'H.264'} (${this.config.string}).`+
+        (codec==='h265'?' Use a browser with HEVC support, or turn off HEVC (H.265) on the phone.':'');
+      render();return;
+    }
+    this.decoder=decoder;this.label=`${codec==='h265'?'H.265':'H.264'} · ${decoder.kind}`;
+    const pending=this.pending;this.pending=null;
+    for(const frame of pending)decoder.decode(...frame);
+    render();
+  },
+  decode(data,keyFrame,timestamp){
+    if(this.pending){if(this.pending.length<240)this.pending.push([data.slice(),keyFrame,timestamp]);return;}
+    this.decoder?.decode(data,keyFrame,timestamp);
+  },
+  failed(reason){
+    console.warn('video decoder failed',reason);
+    const config=this.config;this.generation++;this.close();this.config=null;
+    this.failures=performance.now()-this.failedAt<3000?this.failures+1:1;this.failedAt=performance.now();
+    if(this.failures>3){this.error='The browser could not decode the video stream.';render();return;}
+    // Start over at the next random access picture; the server drops queued pictures for us.
+    if(config&&stream.active){send('k');this.configure(config.codec,config.description);}
+  },
+  presented(){
+    this.frames++;
+    if(!this.shown){this.shown=true;render();}
+  },
+  close(){this.decoder?.close();this.decoder=null;this.pending=null;canvas.hidden=true;video.hidden=true;if(this.shown){this.shown=false;render();}},
+  reset(){this.generation++;this.close();this.config=null;this.error='';this.label='';},
+};
+setInterval(()=>{videoOut.fps=videoOut.frames;videoOut.frames=0;render();},1000);
+
+async function webCodecsDecoder(config){
+  if(!window.isSecureContext||!('VideoDecoder' in window))return null;
+  const settings={codec:config.string,description:config.description,optimizeForLatency:true};
+  try{if(!(await VideoDecoder.isConfigSupported(settings)).supported)return null;}catch(_){return null;}
+  const context=canvas.getContext('2d',{alpha:false,desynchronized:true});
+  let needKey=true,closed=false;
+  const decoder=new VideoDecoder({
+    output(frame){
+      if(closed){frame.close();return;}
+      if(canvas.width!==frame.displayWidth||canvas.height!==frame.displayHeight){canvas.width=frame.displayWidth;canvas.height=frame.displayHeight;}
+      context.drawImage(frame,0,0);frame.close();
+      canvas.hidden=false;videoOut.presented();
+    },
+    error(error){if(!closed)videoOut.failed(error);},
+  });
+  decoder.configure(settings);
+  return {
+    kind:'WebCodecs',
+    decode(data,keyFrame,timestamp){
+      if(closed||decoder.state!=='configured')return;
+      if(needKey){if(!keyFrame)return;needKey=false;}
+      // Decoding slower than real time: skip to the next random access picture.
+      if(decoder.decodeQueueSize>6){needKey=true;send('k');return;}
+      decoder.decode(new EncodedVideoChunk({type:keyFrame?'key':'delta',timestamp,data}));
+    },
+    close(){closed=true;if(decoder.state!=='closed')decoder.close();},
+  };
+}
+
+// Minimal fragmented MP4: one video track, one sample per fragment, samples stay length-prefixed.
+const ascii=text=>Uint8Array.from(text,c=>c.charCodeAt(0));
+function concat(parts){const out=new Uint8Array(parts.reduce((n,p)=>n+p.length,0));let at=0;for(const p of parts){out.set(p,at);at+=p.length;}return out;}
+function uint(bytes,value){const out=new Uint8Array(bytes);for(let i=bytes-1;i>=0;i--){out[i]=value%256;value=Math.floor(value/256);}return out;}
+const u8=v=>uint(1,v),u16=v=>uint(2,v),u24=v=>uint(3,v),u32=v=>uint(4,v),u64=v=>uint(8,v),zero=n=>new Uint8Array(n);
+const box=(type,...parts)=>{const body=concat(parts);return concat([u32(body.length+8),ascii(type),body]);};
+const full=(type,version,flags,...parts)=>box(type,u8(version),u24(flags),...parts);
+function initSegment(config,width,height){
+  const matrix=[0x10000,0,0,0,0x10000,0,0,0,0x40000000].map(u32),hevc=config.codec==='h265';
+  const entry=box(hevc?'hvc1':'avc1',zero(6),u16(1),zero(16),u16(width),u16(height),u32(0x480000),u32(0x480000),u32(0),u16(1),
+    zero(32),u16(0x18),u16(0xffff),box(hevc?'hvcC':'avcC',config.description));
+  const stbl=box('stbl',full('stsd',0,0,u32(1),entry),full('stts',0,0,u32(0)),full('stsc',0,0,u32(0)),full('stsz',0,0,u32(0),u32(0)),full('stco',0,0,u32(0)));
+  const minf=box('minf',full('vmhd',0,1,zero(8)),box('dinf',full('dref',0,0,u32(1),full('url ',0,1))),stbl);
+  const mdia=box('mdia',full('mdhd',0,0,u32(0),u32(0),u32(90000),u32(0),u16(0x55c4),u16(0)),
+    full('hdlr',0,0,u32(0),ascii('vide'),zero(12),ascii('VideoHandler'),u8(0)),minf);
+  const trak=box('trak',full('tkhd',0,3,u32(0),u32(0),u32(1),u32(0),u32(0),zero(8),u16(0),u16(0),u16(0),u16(0),...matrix,u32(width*65536),u32(height*65536)),mdia);
+  const moov=box('moov',full('mvhd',0,0,u32(0),u32(0),u32(1000),u32(0),u32(0x10000),u16(0x100),zero(10),...matrix,zero(24),u32(2)),
+    trak,box('mvex',full('trex',0,0,u32(1),u32(1),u32(0),u32(0),u32(0))));
+  return concat([box('ftyp',ascii('isom'),u32(0x200),ascii('isom'),ascii('iso6'),ascii('mp41')),moov]);
+}
+function mediaSegment(sequence,data,keyFrame,decodeTime,duration){
+  const moof=offset=>box('moof',full('mfhd',0,0,u32(sequence)),box('traf',full('tfhd',0,0x020000,u32(1)),full('tfdt',1,0,u64(decodeTime)),
+    full('trun',0,0x000701,u32(1),u32(offset),u32(duration),u32(data.length),u32(keyFrame?0x02000000:0x01010000))));
+  return concat([moof(moof(0).length+8),box('mdat',data)]);
+}
+
+async function mseDecoder(config){
+  const Source=window.ManagedMediaSource||window.MediaSource;
+  const mime=`video/mp4; codecs="${config.string}"`;
+  if(!Source||!Source.isTypeSupported(mime))return null;
+  const source=new Source(),url=URL.createObjectURL(source);
+  video.disableRemotePlayback=true;video.src=url;
+  await new Promise((resolve,reject)=>{source.addEventListener('sourceopen',resolve,{once:true});setTimeout(()=>reject(new Error('MediaSource did not open')),3000);});
+  URL.revokeObjectURL(url);
+  try{source.duration=Infinity;}catch(_){}
+  const buffer=source.addSourceBuffer(mime);
+  video.hidden=false;// frame callbacks need a rendered element; the waiting overlay covers it
+  const queue=[initSegment(config,stream.width||1280,stream.height||720)];
+  let closed=false,needKey=true,sequence=0,decodeTime=0,lastArrival=0,keyTime=0,keyAt=performance.now(),bytesSinceKey=0;
+  function pump(){
+    if(closed||buffer.updating||!queue.length)return;
+    try{buffer.appendBuffer(queue.length===1?queue.pop():concat(queue.splice(0)));}
+    catch(error){videoOut.failed(error);}
+  }
+  buffer.addEventListener('updateend',()=>{if(!closed){pump();if(video.paused)video.play().catch(()=>{});}});
+  buffer.addEventListener('error',()=>{if(!closed)videoOut.failed('SourceBuffer error');});
+  const onFrame=()=>{if(closed)return;videoOut.presented();video.hidden=false;watchFrames();};
+  const watchFrames=()=>{if('requestVideoFrameCallback' in video)video.requestVideoFrameCallback(onFrame);};
+  if('requestVideoFrameCallback' in video)watchFrames();else video.addEventListener('timeupdate',onFrame);
+  // Follow the live edge by speeding up rather than seeking: random access pictures are rare.
+  const timer=setInterval(()=>{
+    if(closed||!video.buffered.length)return;
+    const end=video.buffered.end(video.buffered.length-1),lag=end-video.currentTime;
+    const rate=lag>0.3?1.5:lag>0.12?1.15:1;
+    if(video.playbackRate!==rate)video.playbackRate=rate;
+    if(video.paused)video.play().catch(()=>{});
+    // Buffered pictures can only be released up to a random access picture; ask for one now and then.
+    if(performance.now()-keyAt>20000||bytesSinceKey>24e6){keyAt=performance.now();send('K');}
+    if(!buffer.updating&&keyTime>video.buffered.start(0)+1&&keyTime<=video.currentTime){
+      try{buffer.remove(0,keyTime);}catch(_){}
+    }
+  },100);
+  return {
+    kind:'Media Source',
+    decode(data,keyFrame,arrivalUs){
+      if(closed)return;
+      if(needKey){if(!keyFrame)return;needKey=false;}
+      // A contiguous timeline; each picture lasts as long as the gap before it (clamped), and a
+      // static screen simply waits at the end of the buffer for the next picture.
+      const duration=lastArrival?Math.max(450,Math.min(9000,Math.round((arrivalUs-lastArrival)*0.09))):1500;
+      lastArrival=arrivalUs;
+      if(keyFrame){keyTime=decodeTime/90000;keyAt=performance.now();bytesSinceKey=0;}
+      bytesSinceKey+=data.length;
+      if(queue.length>60){needKey=true;queue.length=0;send('k');return;}
+      queue.push(mediaSegment(++sequence,data,keyFrame,decodeTime,duration));
+      decodeTime+=duration;pump();
+    },
+    close(){
+      closed=true;clearInterval(timer);video.removeEventListener('timeupdate',onFrame);
+      try{if(source.readyState==='open')source.endOfStream();}catch(_){}
+      video.removeAttribute('src');video.load();video.playbackRate=1;
+    },
+  };
+}
+
+// ---- audio (main display only) -----------------------------------------------------------------
+// The phone sends its audio here while this page is open. Browsers only start sound after a tap or key
+// press (pointerdown does not count on touch screens), so any of those turns it on; audio that arrives
+// before then is dropped. Playback runs on the audio thread from a jitter buffer per stream: it grows
+// after an underrun, and playing slightly faster or slower keeps it filled despite network bursts and
+// the two devices' clock drift, without the gaps and clicks of scheduling every packet separately.
+const PLAYER=`
+const MIN=0.08,MAX=0.3,STEP=0.04,LIMIT=0.6;
+registerProcessor('carplay-audio',class extends AudioWorkletProcessor{
+  constructor(){super();this.streams=new Map();this.port.onmessage=e=>this.receive(e.data);}
+  receive(m){
+    if(m.reset){this.streams.clear();return;}
+    let s=this.streams.get(m.id);
+    if(!s||s.rate!==m.rate||s.channels!==m.channels){
+      const capacity=Math.ceil(m.rate*LIMIT*2);
+      s={rate:m.rate,channels:m.channels,capacity,ring:new Float32Array(capacity*m.channels),written:0,read:0,
+        playing:false,target:MIN,starvedAt:-1};
+      this.streams.set(m.id,s);
+    }
+    const pcm=new Int16Array(m.pcm),frames=pcm.length/s.channels|0;
+    for(let i=0;i<frames;i++){
+      const at=(s.written+i)%s.capacity*s.channels;
+      for(let c=0;c<s.channels;c++)s.ring[at+c]=pcm[i*s.channels+c]/32768;
+    }
+    s.written+=frames;
+    // Far behind (a stall or a background tab): skip ahead rather than keep the latency.
+    if(s.written-s.read>s.rate*LIMIT)s.read=s.written-s.rate*s.target;
+  }
+  process(_,outputs){
+    const out=outputs[0],n=out[0].length;
+    for(const s of this.streams.values()){
+      let fill=s.written-s.read;
+      if(!s.playing){
+        if(fill<s.rate*s.target)continue;
+        // Starved and back within half a second: the network needs a deeper buffer.
+        if(s.starvedAt>=0&&currentTime-s.starvedAt<0.5)s.target=Math.min(MAX,s.target+STEP);
+        s.playing=true;
+      }
+      const error=fill/s.rate-s.target,speed=1+Math.max(-0.01,Math.min(0.01,error*0.05));
+      const step=s.rate/sampleRate*speed,C=s.channels;
+      for(let i=0;i<n;i++){
+        const index=Math.floor(s.read);
+        if(index+1>=s.written){s.playing=false;s.starvedAt=currentTime;break;}
+        const f=s.read-index,p=index%s.capacity*C,q=(index+1)%s.capacity*C;
+        for(let c=0;c<out.length;c++){
+          const k=Math.min(c,C-1),a=s.ring[p+k];
+          out[c][i]+=a+(s.ring[q+k]-a)*f;
+        }
+        s.read+=step;
+      }
+    }
+    return true;
+  }
+});`;
+const audio={
+  context:null,node:null,
+  running(){return this.context?.state==='running';},
+  create(){
+    const Context=window.AudioContext||window.webkitAudioContext;if(!main||!Context)return;
+    // Safari: play through the ring/silent switch like a media app.
+    try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(_){}
+    const context=new Context({latencyHint:'interactive'});this.context=context;
+    context.onstatechange=()=>{if(!this.running())this.reset();render();};
+    if(!context.audioWorklet){console.warn('AudioWorklet unavailable');return;}
+    const url=URL.createObjectURL(new Blob([PLAYER],{type:'text/javascript'}));
+    context.audioWorklet.addModule(url).then(()=>{
+      this.node=new AudioWorkletNode(context,'carplay-audio',{numberOfInputs:0,outputChannelCount:[2]});
+      this.node.connect(context.destination);
+    }).catch(error=>console.warn('audio player failed',error)).finally(()=>URL.revokeObjectURL(url));
+  },
+  unlock(){
+    const context=this.context;
+    if(context&&context.state!=='running'&&context.state!=='closed')context.resume().then(()=>render(),()=>{});
+  },
+  play(id,rate,channels,data){
+    if(!this.node||!this.running()||!channels||!rate)return;
+    const pcm=data.slice(7,7+Math.floor((data.byteLength-7)/(2*channels))*2*channels);// s16le, realigned
+    if(pcm.byteLength)this.node.port.postMessage({id,rate,channels,pcm},[pcm]);
+  },
+  // A stopped stream simply drains; its next packets may already be on their way.
+  stop(_){},
+  reset(){this.node?.port.postMessage({reset:true});},
+};
+audio.create();
+for(const name of ['pointerup','touchend','click','keydown'])document.addEventListener(name,()=>audio.unlock(),{capture:true,passive:true});
+
+// ---- touch (main display only) -----------------------------------------------------------------
+// Every message carries all pressed contacts, sent in order over the socket the moment it changes.
 const pointers=new Map();
-function endpoint(action){const url=new URL(`${route}/${action}`,location.origin);url.searchParams.set('key',key);return url;}
-function mapPoint(x,y,rect,width,height,clamp=false){
+function mapPoint(x,y,clamp){
+  const rect=surface.getBoundingClientRect(),width=stream.width,height=stream.height;
   if(!rect.width||!rect.height||!width||!height)return null;
   const scale=Math.min(rect.width/width,rect.height/height),w=width*scale,h=height*scale;
   const px=(x-rect.left-(rect.width-w)/2)/w,py=(y-rect.top-(rect.height-h)/2)/h;
   if(!clamp&&(px<0||px>1||py<0||py>1))return null;
   return {x:Math.max(0,Math.min(1,px)),y:Math.max(0,Math.min(1,py))};
 }
-function contacts(){return [...pointers.values()].sort((a,b)=>a.id-b.id).map(p=>`${p.id},${p.x},${p.y}`).join(';');}
-let sending=false,queue=[],touchGeneration=0;
-async function drain(){
-  if(sending)return;sending=true;
-  const token=touchGeneration;
-  try{
-    while(queue.length&&token===touchGeneration){
-      const item=queue.shift(),url=endpoint('touch');url.searchParams.set('client',client);url.searchParams.set('contacts',item.value);
-      const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),1500);
-      let response;try{response=await fetch(url,{method:'POST',cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
-      if(!response.ok)throw new Error('Control unavailable');
-    }
-  }catch(_){queue=[];pointers.clear();live=false;beaconRelease();status.textContent='Control interrupted';}
-  finally{sending=false;if(queue.length)drain();}
+function sendTouch(){
+  const contacts=[...pointers.values()].sort((a,b)=>a.id-b.id).map(p=>`${p.id},${p.x.toFixed(5)},${p.y.toFixed(5)}`).join(';');
+  if(!send('t:'+contacts))pointers.clear();
 }
-function sendTouch(kind='edge'){
-  if(!main)return;
-  const item={kind,value:contacts()},tail=queue[queue.length-1];
-  if(kind==='move'&&tail?.kind==='move')queue[queue.length-1]=item;
-  else if(queue.length<32)queue.push(item);
-  else{queue=[];pointers.clear();live=false;beaconRelease();return;}
-  drain();
-}
-function beaconRelease(){if(!main)return;const url=endpoint('touch');url.searchParams.set('client',client);url.searchParams.set('contacts','');navigator.sendBeacon(url,'');}
-function release(){if(!pointers.size)return;pointers.clear();sendTouch();}
-function state(active,message){live=active;screen.classList.toggle('stale',!active);waiting.hidden=active;status.textContent=message;if(!active)release();}
-async function poll(token){
-  if(token!==generation||document.hidden)return;
-  const started=Date.now(),controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),3000);
-  try{
-    const url=endpoint('frame');url.searchParams.set('after',sequence);
-    const response=await fetch(url,{cache:'no-store',signal:controller.signal});
-    if(token!==generation)return;
-    if(response.status===401){state(false,'Display address has changed');return;}
-    if(response.status!==200&&response.status!==204)throw new Error('Unavailable');
-    width=Number(response.headers.get('X-Display-Width'));height=Number(response.headers.get('X-Display-Height'));
-    const active=response.headers.get('X-Stream-Active')==='true';
-    if(response.status===200){
-      const blob=await response.blob();if(token!==generation)return;
-      const next=URL.createObjectURL(blob);
-      await new Promise((resolve,reject)=>{screen.onload=resolve;screen.onerror=reject;screen.src=next;}).catch(error=>{URL.revokeObjectURL(next);throw error;});
-      if(token!==generation){URL.revokeObjectURL(next);return;}
-      if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=next;screen.hidden=false;
-      sequence=Number(response.headers.get('X-Frame-Sequence'));
-    }
-    if(!active){sequence=0;screen.hidden=true;}
-    state(active&&!screen.hidden,active&&!screen.hidden?`${width} × ${height}`:'Waiting for CarPlay');
-  }catch(_){if(token===generation)state(false,'Reconnecting…');}
-  finally{clearTimeout(timeout);}
-  if(token===generation)setTimeout(()=>poll(token),Math.max(0,66-(Date.now()-started)));
-}
-surface.addEventListener('contextmenu',event=>event.preventDefault());
+function release(){if(pointers.size){pointers.clear();sendTouch();}}
 surface.addEventListener('pointerdown',event=>{
-  if(!main||!live||pointers.size>=2||(event.pointerType==='mouse'&&event.button!==0))return;
-  const point=mapPoint(event.clientX,event.clientY,surface.getBoundingClientRect(),width,height);if(!point)return;
-  event.preventDefault();const id=[...pointers.values()].some(p=>p.id===0)?1:0;
-  pointers.set(event.pointerId,{id,...point});surface.setPointerCapture(event.pointerId);sendTouch();
+  if(!main||!stream.active||!stream.control||pointers.size>=2||(event.pointerType==='mouse'&&event.button!==0))return;
+  const point=mapPoint(event.clientX,event.clientY,false);if(!point)return;
+  event.preventDefault();
+  const id=[...pointers.values()].some(p=>p.id===0)?1:0;
+  pointers.set(event.pointerId,{id,...point});
+  try{surface.setPointerCapture(event.pointerId);}catch(_){}
+  sendTouch();
 });
 surface.addEventListener('pointermove',event=>{
-  const p=pointers.get(event.pointerId);if(!p)return;
-  const point=mapPoint(event.clientX,event.clientY,surface.getBoundingClientRect(),width,height,true);if(!point)return;
-  Object.assign(p,point);sendTouch('move');
+  const pointer=pointers.get(event.pointerId);if(!pointer)return;
+  const point=mapPoint(event.clientX,event.clientY,true);
+  if(!point||(point.x===pointer.x&&point.y===pointer.y))return;
+  Object.assign(pointer,point);sendTouch();
 });
-function up(event){if(pointers.delete(event.pointerId))sendTouch();}
-for(const name of ['pointerup','pointercancel','lostpointercapture'])surface.addEventListener(name,up);
-setInterval(()=>{if(pointers.size)sendTouch('move');},400);
+// The phone lifts a finger where it was last reported, so report where it actually left first.
+function lift(event){
+  const pointer=pointers.get(event.pointerId);if(!pointer)return;
+  const point=event.type==='pointerup'?mapPoint(event.clientX,event.clientY,true):null;
+  if(point&&(point.x!==pointer.x||point.y!==pointer.y)){Object.assign(pointer,point);sendTouch();}
+  pointers.delete(event.pointerId);sendTouch();
+}
+for(const name of ['pointerup','pointercancel','lostpointercapture'])surface.addEventListener(name,lift);
+// Keeps the phone's touch lease alive while a finger rests without moving.
+setInterval(()=>{if(pointers.size)sendTouch();},250);
+for(const name of ['touchstart','touchmove','gesturestart'])surface.addEventListener(name,event=>{if(event.cancelable)event.preventDefault();},{passive:false});
+surface.addEventListener('contextmenu',event=>event.preventDefault());
 window.addEventListener('blur',release);
-document.addEventListener('visibilitychange',()=>{generation++;release();if(!document.hidden)poll(generation);});
-window.addEventListener('pagehide',()=>{generation++;touchGeneration++;queue=[];pointers.clear();beaconRelease();if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;});
-window.addEventListener('pageshow',event=>{if(event.persisted){sequence=0;screen.hidden=true;poll(++generation);}});
-document.getElementById('fullscreen').addEventListener('click',async()=>{
+document.addEventListener('visibilitychange',()=>{if(document.hidden)release();else connect();});
+window.addEventListener('pagehide',()=>{release();stopped=true;socket?.close();});
+window.addEventListener('pageshow',event=>{if(event.persisted){stopped=false;connect();}});
+$('fullscreen').addEventListener('click',async()=>{
   try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}
-  catch(_){status.textContent='Use the browser menu for full screen';}
+  catch(_){flash('Use the browser menu for full screen');}
 });
-poll(generation);
+connect();
 </script>
 </html>

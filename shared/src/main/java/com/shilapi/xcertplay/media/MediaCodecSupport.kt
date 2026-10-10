@@ -83,6 +83,40 @@ object MediaCodecSupport {
         return output.toByteArray()
     }
 
+    /**
+     * Normalizes a complete access unit to four-byte length prefixes, the sample format of
+     * avcC/hvcC streams (MP4, WebCodecs). Returns an empty array for damaged input.
+     */
+    fun toLengthPrefixed(bytes: ByteArray): ByteArray {
+        if (startCodeSize(bytes, 0) != 0) {
+            val units = annexBNalUnits(bytes)
+            val output = ByteArrayOutputStream(bytes.size + units.size)
+            units.forEach { unit ->
+                output.write(byteArrayOf((unit.size ushr 24).toByte(), (unit.size ushr 16).toByte(),
+                    (unit.size ushr 8).toByte(), unit.size.toByte()))
+                output.write(unit)
+            }
+            return output.toByteArray()
+        }
+        return if (lengthPrefixedHeaders(bytes).isEmpty()) ByteArray(0) else bytes
+    }
+
+    /** The first two bytes (NAL header) of every unit in a four-byte length-prefixed access unit. */
+    fun lengthPrefixedHeaders(bytes: ByteArray): List<ByteArray> {
+        val headers = mutableListOf<ByteArray>()
+        var cursor = 0
+        while (cursor < bytes.size) {
+            if (bytes.size - cursor < 4) return emptyList()
+            val length = ((bytes[cursor].toLong() and 255) shl 24) or ((bytes[cursor + 1].toLong() and 255) shl 16) or
+                ((bytes[cursor + 2].toLong() and 255) shl 8) or (bytes[cursor + 3].toLong() and 255)
+            cursor += 4
+            if (length <= 0 || length > bytes.size - cursor) return emptyList()
+            headers.add(bytes.copyOfRange(cursor, cursor + minOf(2, length.toInt())))
+            cursor += length.toInt()
+        }
+        return headers
+    }
+
     /** Raw NAL units from either three- or four-byte Annex B start codes. */
     fun annexBNalUnits(bytes: ByteArray): List<ByteArray> {
         if (startCodeSize(bytes, 0) == 0) return emptyList()

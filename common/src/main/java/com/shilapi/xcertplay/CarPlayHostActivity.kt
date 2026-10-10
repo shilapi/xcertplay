@@ -259,6 +259,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var clusterPreviewSurface: Surface? = null
     private val webDisplayInputs = mutableMapOf<Int, Pair<EditText, EditText>>()
     private val webDisplayRefresh = mutableListOf<() -> Unit>()
+    private val webDisplayAddressViews = mutableMapOf<Int, TextView>()
     private var videoView: TextureView? = null
     private var contentRoot: FrameLayout? = null
     private var gestureOverlay: View? = null
@@ -1211,6 +1212,15 @@ class CarPlayHostActivity : ComponentActivity() {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     .apply { topMargin = dp(16) })
         }
+        content.addView(
+            menuText(
+                "Web displays use HTTPS with a self-signed certificate so browsers can decode with WebCodecs " +
+                    "(H.265 included). Each browser warns once: choose to continue.",
+                13f,
+                MENU_SECONDARY,
+            ),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(16) })
 
         val hevcRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1658,6 +1668,7 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         details.addView(preview)
         val address = menuText("", 13f, MENU_ACCENT).apply { setTextIsSelectable(true) }
+        webDisplayAddressViews[type] = address
         details.addView(address)
         details.addView(menuText("Apply with Save & Reconnect", 13f, MENU_SECONDARY))
         section.addView(details)
@@ -1668,11 +1679,17 @@ class CarPlayHostActivity : ComponentActivity() {
             width.setText(config.width.toString()); height.setText(config.height.toString())
             width.error = null; height.error = null
             details.visibility = if (config.enabled) View.VISIBLE else View.GONE
-            address.text = CarPlayWebDisplayFactory.urls(type, AirPlayPersistence.webDisplayKey(this))
-                .joinToString("\n").ifEmpty { "Connect to a local network to get the display address" }
+            updateWebDisplayAddresses()
         }
         webDisplayRefresh.last().invoke()
         return section
+    }
+
+    private fun updateWebDisplayAddresses() {
+        for ((type, view) in webDisplayAddressViews) {
+            view.text = CarPlayWebDisplayFactory.urls(type, AirPlayPersistence.webDisplayKey(this))
+                .joinToString("\n").ifEmpty { "Connect to a local network to get the display address" }
+        }
     }
 
     private fun validateWebDisplaySettings(): Boolean {
@@ -3517,7 +3534,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 microphoneGainPercent = microphoneGainPercent,
                 mediaMetricsMonitor = mediaMetricsMonitor,
                 onClosed = { outputs?.close() },
-                onVideoOutputActiveChanged = { type, active -> outputs?.streamActive(type, active) },
+                mediaTap = outputs,
                 onScreenStreamActiveChanged = { type, active ->
                     onScreenStreamStateChanged(controllerGeneration, type, active)
                 },

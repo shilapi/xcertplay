@@ -68,7 +68,7 @@ internal class VideoDecodePump(private val port: Port) {
 }
 
 /** Every new decoder needs random access. CRA's RASL pictures may refer to the discarded GOP. */
-internal class VideoSyncGate(private val codec: VideoCodec) {
+class VideoSyncGate(private val codec: VideoCodec) {
     private var waiting = true
     private var skipRasl = false
     val waitingForRandomAccess: Boolean get() = waiting
@@ -76,14 +76,12 @@ internal class VideoSyncGate(private val codec: VideoCodec) {
     fun accept(annexB: ByteArray): Boolean {
         val units = MediaCodecSupport.annexBNalUnits(annexB)
         require(units.isNotEmpty()) { "Empty or malformed video access unit" }
-        val types = units.map {
-            require(it[0].toInt() and 0x80 == 0) { "Invalid NAL header" }
-            if (codec == VideoCodec.H265) {
-                require(it.size >= 2 && it[1].toInt() and 7 != 0) { "Invalid HEVC NAL header" }
-                (it[0].toInt() ushr 1) and 0x3f
-            } else it[0].toInt() and 0x1f
-        }
-        val randomAccess = types.any { if (codec == VideoCodec.H265) it in 16..21 else it == 5 }
+        return acceptTypes(nalUnitTypes(codec, units))
+    }
+
+    /** Same decision as [accept], for callers that already parsed the NAL unit types. */
+    fun acceptTypes(types: List<Int>): Boolean {
+        val randomAccess = isRandomAccess(codec, types)
         if (waiting) {
             if (!randomAccess) return false
             waiting = false
@@ -94,5 +92,19 @@ internal class VideoSyncGate(private val codec: VideoCodec) {
             if (types.any { it in 0..5 || it in 10..15 }) skipRasl = false
         }
         return true
+    }
+
+    companion object {
+        /** NAL unit types from NAL units (or at least their two-byte headers). */
+        fun nalUnitTypes(codec: VideoCodec, units: List<ByteArray>): List<Int> = units.map {
+            require(it.isNotEmpty() && it[0].toInt() and 0x80 == 0) { "Invalid NAL header" }
+            if (codec == VideoCodec.H265) {
+                require(it.size >= 2 && it[1].toInt() and 7 != 0) { "Invalid HEVC NAL header" }
+                (it[0].toInt() ushr 1) and 0x3f
+            } else it[0].toInt() and 0x1f
+        }
+
+        fun isRandomAccess(codec: VideoCodec, types: List<Int>): Boolean =
+            types.any { if (codec == VideoCodec.H265) it in 16..21 else it == 5 }
     }
 }

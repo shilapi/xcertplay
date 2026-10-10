@@ -18,6 +18,8 @@
   corresponding Android channels.
 - Dynamic Activity resizing with automatic re-handshaking to the new
   resolution.
+- Separate web pages for the main and instrument displays (the browser decodes
+  H.264/H.265 directly; the main display supports touch and audio).
 - Vehicle head-unit location reporting.
 - Android 9 (API 28) support.
 
@@ -30,6 +32,23 @@
 4. Scroll to the bottom and select `Save & Reconnect`.
 5. Connect your MFi chip using the method you selected.
 6. Wait for the connection to complete, then enjoy.
+
+## Web displays
+
+1. In Settings, under `Web displays`, enable `Main display` and/or
+   `Instrument display`, set the resolution, then tap `Save & Reconnect`.
+2. Put the browser device on the same LAN as the Android device and open the
+   address shown in Settings (`https://<IP>:8080/main` or `/cluster`, including
+   the access key; it can be copied).
+3. The certificate is self-signed: each browser warns once, choose to continue.
+4. Main display page: touch with up to two fingers; while it is open the
+   phone's audio plays in the page. Tap the screen once to turn on sound
+   (a browser requirement). The microphone stays on Android.
+5. The instrument display page is view-only and needs the iPhone to provide the
+   second display stream.
+
+Use a recent Chrome, Edge, or Safari. If the browser cannot play H.265, turn
+off `HEVC (H.265)` in Settings.
 
 ## Current progress
 
