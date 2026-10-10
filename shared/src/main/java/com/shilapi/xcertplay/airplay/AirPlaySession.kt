@@ -82,6 +82,7 @@ class AirPlaySession(
     private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
     private val eventThreads = CopyOnWriteArrayList<Thread>()
+    private val displayControl = AirPlayDisplayControlFactory.create(config, ::sendCommand) { debugLog(it) }
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     val localAddress: InetAddress? = socket.localAddress
@@ -274,6 +275,7 @@ class AirPlaySession(
                 accumulated += plaintext
                 val parsed = RtspMessage.parseMessages(accumulated)
                 accumulated = parsed.rest
+                if (parsed.messages.isNotEmpty()) displayControl.responseStarted()
                 for (request in parsed.messages) {
                     val cseq = request.headers["cseq"] ?: "-"
                     val path = request.path.lowercase()
@@ -312,6 +314,7 @@ class AirPlaySession(
                     }
                 }
                 output.flush()
+                if (parsed.messages.isNotEmpty()) displayControl.responseSent()
                 notifySetupResponseSent()
             }
         } catch (error: Exception) {
@@ -349,15 +352,13 @@ class AirPlaySession(
                 else RtspMessage.Response(headers = mapOf("Content-Type" to OCTET_CONTENT_TYPE), body = body)
             }
             path.endsWith("/info") -> {
-                val info = AirPlayInfoPlist.build(config)
-                if (request.body.isNotEmpty()) {
-                    val requestInfo = try {
-                        BplistCodec.decode(request.body).toString()
-                    } catch (_: Exception) {
-                        "<unparseable ${request.body.size} bytes>"
-                    }
-                    debugLog("airplay /info request=$requestInfo")
+                val requestInfo = try {
+                    if (request.body.isEmpty()) emptyMap() else asMap(BplistCodec.decode(request.body)) ?: emptyMap()
+                } catch (_: Exception) {
+                    debugLog("airplay /info request decode failed bytes=${request.body.size}")
+                    return RtspMessage.Response(status = 400)
                 }
+                val info = displayControl.info(requestInfo)
                 Log.i(
                     TAG,
                     "airplay /info features=${info["features"]} " +
@@ -443,19 +444,15 @@ class AirPlaySession(
         }
 
         val peerTimingPort = long(dict["timingPort"])?.toInt() ?: 0
+        val eventPort = openEvent()
         val response = linkedMapOf<String, Any?>(
             "timingPort" to openTiming(peerTimingPort),
-            "eventPort" to openEvent(),
+            "eventPort" to eventPort,
         )
         if (dict["keepAliveLowPower"] == true || dict["keepAliveLowPower"] == 1L) {
             response["keepAlivePort"] = openKeepAlive()
         }
-        val features = mutableListOf<String>()
-        if (config.hevc) features.add("hevc")
-        features.add("iAPChannel")
-        features.add("viewAreas")
-        if (config.cluster != null) features.add("altScreen")
-        response["enabledFeatures"] = features
+        response["enabledFeatures"] = displayControl.negotiate(dict["features"], eventPort > 0)
         return RtspMessage.Response(
             headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
             body = BplistCodec.encode(response),
@@ -470,10 +467,15 @@ class AirPlaySession(
             debugLog("airplay SETUP stream type=$type payload=$stream")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
+                    if (type == STREAM_TYPE_ALT_SCREEN && !displayControl.acceptsAlternateScreen()) {
+                        debugLog("airplay screen stream rejected type=111: altScreen/uiContext not negotiated")
+                        continue
+                    }
                     val port = media.onScreen(this, type, stream)
                     debugLog("airplay screen stream type=$type dataPort=${port ?: "rejected"}")
                     if (port != null) {
                         activeStreams.add(type)
+                        displayControl.screenReady(type)
                         result.add(linkedMapOf("type" to type, "dataPort" to port))
                     }
                 }
@@ -514,6 +516,12 @@ class AirPlaySession(
         }
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
+        try {
+            displayControl.receive(type, params)
+        } catch (error: IllegalArgumentException) {
+            debugLog("airplay display command rejected type=$type reason=${error.message}")
+            return RtspMessage.Response(status = 400)
+        }
         debugLog("airplay command type=$type keys=${params.keys.sorted()}")
         if (type == "modesChanged") {
             val resources = (params["resources"] as? List<*>)
@@ -550,10 +558,15 @@ class AirPlaySession(
         trace("airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHex()}")
 
         if (types.isEmpty()) {
-            activeStreams.toList().forEach { media.onTeardown(this, it) }
+            activeStreams.toList().forEach { displayControl.screenClosed(it); media.onTeardown(this, it) }
             activeStreams.clear()
         } else {
-            types.forEach { type -> if (activeStreams.remove(type)) media.onTeardown(this, type) }
+            types.forEach { type ->
+                if (activeStreams.remove(type)) {
+                    displayControl.screenClosed(type)
+                    media.onTeardown(this, type)
+                }
+            }
         }
         return RtspMessage.Response(status = 200)
     }
@@ -638,6 +651,7 @@ class AirPlaySession(
             synchronized(eventWriteLock) {
                 sendPendingNightModeLocked()
             }
+            displayControl.flush()
             runEventRead(socket)
         } catch (error: Exception) {
             if (!closed.get()) {
@@ -674,7 +688,11 @@ class AirPlaySession(
                     debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )
-                    val response = RtspMessage.buildResponse(message, RtspMessage.Response(status = 200))
+                    displayControl.responseStarted()
+                    val result = if (message.method == "POST" && message.path.lowercase().endsWith("/command")) {
+                        handleCommand(message)
+                    } else RtspMessage.Response(status = 200)
+                    val response = RtspMessage.buildResponse(message, result)
                     trace(
                         "airplay event rx headers=${message.headers} " +
                             "bodyHex=${message.body.toHex()}",
@@ -684,6 +702,7 @@ class AirPlaySession(
                         output.write(cipher.encrypt(response))
                         output.flush()
                     }
+                    displayControl.responseSent()
                 }
             }
         } catch (error: Exception) {

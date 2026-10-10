@@ -15,7 +15,7 @@ android {
         targetSdk = 37
         versionCode = 1303
         versionName = "1.3.3"
-
+        testInstrumentationRunner = "com.shilapi.xcertplay.CarPlayMediaServiceLifecycleTest"
     }
 
     signingConfigs {

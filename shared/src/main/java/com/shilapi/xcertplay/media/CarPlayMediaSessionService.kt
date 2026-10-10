@@ -1,8 +1,11 @@
 package com.shilapi.xcertplay.media
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -16,6 +19,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.shilapi.xcertplay.iap2.message.Iap2MediaRemoteCommand
 import com.shilapi.xcertplay.iap2.message.Iap2NowPlayingState
 import com.shilapi.xcertplay.iap2.message.Iap2PlaybackStatus
+import java.io.Closeable
 
 internal data class CarPlayMediaSnapshot(
     val nowPlaying: Iap2NowPlayingState? = null,
@@ -35,6 +39,7 @@ internal object CarPlayMediaSessionBridge {
     private var snapshot = CarPlayMediaSnapshot()
     private var cachedArtwork: CarPlayArtwork? = null
     private var observer: ((CarPlayMediaSnapshot) -> Unit)? = null
+    private var serviceBinding: Closeable? = null
 
     fun attach(
         context: Context,
@@ -42,6 +47,9 @@ internal object CarPlayMediaSessionBridge {
         commandSink: (Iap2MediaRemoteCommand) -> Boolean,
     ) {
         val update = synchronized(this) {
+            // A controller can reconnect while the Activity is stopped. Bound services do not
+            // require a background start; Media3 still owns playback notifications/foregrounding.
+            if (serviceBinding == null) serviceBinding = createServiceBinding(context)
             this.owner = owner
             this.commandSink = commandSink
             snapshot = CarPlayMediaSnapshot()
@@ -49,9 +57,6 @@ internal object CarPlayMediaSessionBridge {
             observer to snapshot
         }
         update.first?.invoke(update.second)
-        context.applicationContext.startService(
-            Intent(context.applicationContext, CarPlayMediaSessionService::class.java),
-        )
     }
 
     fun detach(context: Context, owner: Any) {
@@ -61,12 +66,15 @@ internal object CarPlayMediaSessionBridge {
             commandSink = null
             snapshot = CarPlayMediaSnapshot()
             cachedArtwork = null
+            // Release under the ownership lock so an old close cannot stop a replacement owner.
+            context.applicationContext.stopService(
+                Intent(context.applicationContext, CarPlayMediaSessionService::class.java),
+            )
+            serviceBinding?.close()
+            serviceBinding = null
             observer to snapshot
         }
         update.first?.invoke(update.second)
-        context.applicationContext.stopService(
-            Intent(context.applicationContext, CarPlayMediaSessionService::class.java),
-        )
     }
 
     fun publish(owner: Any, nowPlaying: Iap2NowPlayingState) = update(owner) {
@@ -112,6 +120,20 @@ internal object CarPlayMediaSessionBridge {
 
     fun send(command: Iap2MediaRemoteCommand): Boolean =
         synchronized(this) { commandSink }?.invoke(command) == true
+
+    private fun createServiceBinding(context: Context): Closeable {
+        val application = context.applicationContext
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, service: IBinder) = Unit
+            override fun onServiceDisconnected(name: ComponentName) = Unit
+        }
+        val intent = Intent(application, CarPlayMediaSessionService::class.java)
+            .setAction(MediaSessionService.SERVICE_INTERFACE)
+        check(application.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+            "Could not bind CarPlay media session service"
+        }
+        return Closeable { application.unbindService(connection) }
+    }
 
     private inline fun update(owner: Any, transform: (CarPlayMediaSnapshot) -> CarPlayMediaSnapshot) {
         val update = synchronized(this) {

@@ -12,7 +12,7 @@
             android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
-            android:theme="@style/Theme.Xcertplay"
+            android:theme="@style/Theme.Xcertplay.CarPlay"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

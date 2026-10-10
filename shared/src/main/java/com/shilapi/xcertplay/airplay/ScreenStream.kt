@@ -25,6 +25,8 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
         fun onFrame(naluBytes: ByteArray) {}
+        /** Original header and wire body, plus decrypted length-prefixed data before conversion. */
+        fun onPacket(sequence: Long, header: ByteArray, wire: ByteArray, plain: ByteArray?) {}
         fun onClosed(cause: Throwable?) {}
     }
 
@@ -87,6 +89,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
     private fun onMessage(header: ByteArray, body: ByteArray) {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
+                val sequence = frameCounter.get()
                 val payload = if (body.size >= ScreenCodec.TAG_SIZE) {
                     ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
                         .also { frameCounter.incrementAndGet() }
@@ -100,6 +103,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                         "head=${payload.hexPrefix(16)}",
                     )
                 }
+                listener.onPacket(sequence, header, body, payload)
                 listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload, nalLengthSize))
             }
             OP_VIDEO_CONFIG -> {
@@ -110,6 +114,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                 nalLengthSize = (codecData[lengthOffset].toInt() and 3) + 1
                 require(nalLengthSize != 3) { "Reserved NAL length size" }
                 listener.onCodec(codec)
+                listener.onPacket(frameCounter.get(), header, body, null)
                 listener.onConfig(codecData)
             }
         }

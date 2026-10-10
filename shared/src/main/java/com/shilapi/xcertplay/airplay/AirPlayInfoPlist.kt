@@ -24,11 +24,12 @@ object AirPlayInfoPlist {
     private const val PRIORITY_NICE_TO_HAVE = 100
     private const val CONSTRAINT_ANYTIME = 100
 
-    fun build(config: AirPlayConfig): Map<String, Any?> {
+    fun build(config: AirPlayConfig, enabledFeatures: Set<String>? = null): Map<String, Any?> {
+        val cluster = config.cluster.takeIf { enabledFeatures == null || "altScreen" in enabledFeatures }
         val displays = arrayListOf<Any?>(
             displayEntry(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
         )
-        config.cluster?.let { displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID)) }
+        cluster?.let { displays.add(displayEntry(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID)) }
 
         val info = linkedMapOf<String, Any?>(
             "sourceVersion" to config.sourceVersion,
@@ -54,6 +55,10 @@ object AirPlayInfoPlist {
         }
         info["extendedFeatures"] = listOf("vocoderInfo", "enhancedRequestCarUI")
         info["displays"] = displays
+        if (cluster != null && (enabledFeatures == null || "uiContext" in enabledFeatures)) {
+            info["uiContextLastOnDisplayURLs"] = emptyList<String>()
+            info["uiContextNowOnDisplayURLs"] = listOfNotNull(config.main.initialUrl, cluster.initialUrl)
+        }
         info["hidDevices"] = listOf(
             AirPlayHid.touchHidDevice(config.main.widthPixels, config.main.heightPixels, MAIN_UUID),
             AirPlayHid.knobHidDevice(MAIN_UUID),
@@ -72,7 +77,9 @@ object AirPlayInfoPlist {
                 )
             }
         }
-        if (config.hevc) info["hevcInfo"] = emptyMap<String, Any?>()
+        if (config.hevc && (enabledFeatures == null || "hevc" in enabledFeatures)) {
+            info["hevcInfo"] = emptyMap<String, Any?>()
+        }
         return info
     }
 
@@ -167,6 +174,8 @@ object AirPlayInfoPlist {
             "maxFPS" to fps,
             "widthPixels" to display.widthPixels,
             "heightPixels" to display.heightPixels,
+            "widthPixelsMax" to display.widthPixels,
+            "heightPixelsMax" to display.heightPixels,
             "widthPhysical" to widthPhysical,
             "heightPhysical" to heightPhysical,
             "features" to (DISPLAY_FEATURE_HIGH_FIDELITY_TOUCH or DISPLAY_FEATURE_KNOBS),
@@ -175,6 +184,7 @@ object AirPlayInfoPlist {
 
         entry["viewAreas"] = listOf(areaDict(display))
         entry["initialViewArea"] = 0
+        entry["adjacentViewAreas"] = emptyList<Int>()
         if (display.initialUrl != null) entry["initialURL"] = display.initialUrl
         return entry
     }
@@ -186,10 +196,14 @@ object AirPlayInfoPlist {
         val width = display.widthPixels
         val height = display.heightPixels
         val result = linkedMapOf<String, Any?>(
+            "viewAreaIndex" to 0,
             "widthPixels" to (width - view.left - view.right),
             "heightPixels" to (height - view.top - view.bottom),
             "originXPixels" to view.left,
             "originYPixels" to view.top,
+            "viewAreaTransitionControl" to 0,
+            "viewAreaStatusBarEdge" to 0,
+            "viewAreaSupportsFocusTransfer" to false,
         )
         val safe = display.safeArea ?: AirPlayInsets()
         val safeArea = linkedMapOf<String, Any?>(
@@ -201,5 +215,145 @@ object AirPlayInfoPlist {
         )
         result["safeArea"] = safeArea
         return result
+    }
+}
+
+/** Ordinary alternate-display UI control, independent of the Ultra vehicle/UI-sync stack. */
+internal object AirPlayDisplayControlFactory {
+    fun create(config: AirPlayConfig, send: (Map<String, Any?>) -> Boolean, log: (String) -> Unit) =
+        Session(config, send, log)
+
+    class Session internal constructor(
+        private val config: AirPlayConfig,
+        private val send: (Map<String, Any?>) -> Boolean,
+        private val log: (String) -> Unit,
+    ) {
+        private var enabled: Set<String>? = null
+        private var altUrls = emptyList<String>()
+        private val selected = linkedMapOf<String, String>()
+        private val previous = linkedMapOf<String, String>()
+        private val pending = linkedMapOf<String, Map<String, Any?>>()
+        private var pendingResponses = 0
+        private var alternateReady = false
+
+        @Synchronized fun negotiate(value: Any?, eventPortAvailable: Boolean): List<String> {
+            val requested = strings(value)
+            val supported = linkedSetOf("viewAreas")
+            if (config.hevc) supported += "hevc"
+            if (eventPortAvailable) {
+                supported += "iAPChannel"
+                if (config.cluster != null) supported += listOf("altScreen", "uiContext")
+            }
+            val accepted = requested.filterTo(linkedSetOf()) { it in supported }
+            // The phone validates these two features together before creating alternate UI.
+            if (("altScreen" in accepted) != ("uiContext" in accepted)) {
+                accepted.removeAll(setOf("altScreen", "uiContext"))
+            }
+            enabled = accepted
+            if ("altScreen" in accepted) {
+                altUrls.firstOrNull()?.let { select(AirPlayInfoPlist.ALT_UUID, it) }
+            }
+            log("airplay SETUP feature proposal requested=$requested supported=$supported enabled=$accepted")
+            return accepted.toList()
+        }
+
+        @Synchronized fun info(request: Map<String, Any?>): Map<String, Any?> {
+            altUrls = strings(request["altScreenURLs"])
+            if ("altScreen" in enabled.orEmpty()) {
+                val url = config.cluster?.initialUrl?.takeIf { it in altUrls } ?: altUrls.firstOrNull()
+                url?.let { select(AirPlayInfoPlist.ALT_UUID, it) }
+            }
+            val cluster = config.cluster?.let {
+                it.copy(initialUrl = selected[AirPlayInfoPlist.ALT_UUID] ?: it.initialUrl)
+            }
+            val main = config.main.copy(initialUrl = selected[AirPlayInfoPlist.MAIN_UUID] ?: config.main.initialUrl)
+            val info = AirPlayInfoPlist.build(config.copy(main = main, cluster = cluster), enabled).toMutableMap()
+            if ("uiContext" in enabled.orEmpty()) {
+                info["uiContextLastOnDisplayURLs"] = previous.values.distinct()
+            }
+            log("airplay /info altScreenURLs=$altUrls selected=${selected[AirPlayInfoPlist.ALT_UUID] ?: "none"}")
+            // altScreenURLs belongs to the phone's request; never echo it as a response sidecar.
+            return info
+        }
+
+        @Synchronized fun screenReady(type: Int) {
+            if (type == 111) {
+                alternateReady = true
+                selected[AirPlayInfoPlist.ALT_UUID]?.let {
+                    pending[AirPlayInfoPlist.ALT_UUID] = command("showUI", linkedMapOf("uuid" to AirPlayInfoPlist.ALT_UUID, "url" to it))
+                }
+            }
+        }
+
+        @Synchronized fun screenClosed(type: Int) {
+            if (type == 111) alternateReady = false
+        }
+
+        @Synchronized fun acceptsAlternateScreen(): Boolean = "altScreen" in enabled.orEmpty()
+
+        @Synchronized fun receive(type: String, params: Map<String, Any?>) {
+            val features = enabled.orEmpty()
+            when (type) {
+                "suggestUI", "changeUIContext" -> {
+                    if ("uiContext" !in features) return
+                    val offered = if (type == "suggestUI") strings(params["urls"])
+                        else listOfNotNull((params["url"] as? String)?.takeIf { it.isNotBlank() })
+                    val explicit = (params["uuid"] ?: params["displayUUID"]) as? String
+                    val alt = explicit == AirPlayInfoPlist.ALT_UUID || (explicit == null && offered.any { it in altUrls })
+                    val uuid = explicit ?: if (alt) AirPlayInfoPlist.ALT_UUID else AirPlayInfoPlist.MAIN_UUID
+                    require(uuid == AirPlayInfoPlist.MAIN_UUID || (uuid == AirPlayInfoPlist.ALT_UUID && "altScreen" in features)) {
+                        "Unknown UI display UUID"
+                    }
+                    val url = if (alt && explicit == null) offered.firstOrNull { it in altUrls } else offered.firstOrNull()
+                    url?.let { select(uuid, it) }
+                }
+                "requestViewArea" -> {
+                    if ("viewAreas" !in features) return
+                    val uuid = params["displayUUID"] as? String ?: throw IllegalArgumentException("Missing displayUUID")
+                    require(uuid == AirPlayInfoPlist.MAIN_UUID || (uuid == AirPlayInfoPlist.ALT_UUID && "altScreen" in features))
+                    val view = params["viewArea"]
+                    val index = (view as? Number)?.toLong() ?: ((view as? Map<*, *>)?.get("viewAreaIndex") as? Number)?.toLong()
+                    require(index == 0L) { "Unknown view area" }
+                    pending["area:$uuid"] = command("updateViewArea", linkedMapOf(
+                        "uuid" to uuid, "viewAreaIndex" to 0, "adjacentViewAreas" to emptyList<Int>(), "animationDurationMillis" to 0,
+                    ))
+                }
+            }
+        }
+
+        @Synchronized fun responseStarted() {
+            pendingResponses++
+        }
+
+        @Synchronized fun responseSent() {
+            pendingResponses--
+            flush()
+        }
+
+        @Synchronized fun flush() {
+            if (pendingResponses != 0) return
+            val iterator = pending.iterator()
+            while (iterator.hasNext()) {
+                val (key, value) = iterator.next()
+                if (key == AirPlayInfoPlist.ALT_UUID && !alternateReady) continue
+                if (!send(value)) break
+                log("airplay display command sent type=${value["type"]} params=${value["params"]}")
+                iterator.remove()
+            }
+        }
+
+        private fun select(uuid: String, url: String) {
+            if (selected[uuid] == url) return
+            selected[uuid]?.let { previous[uuid] = it }
+            selected[uuid] = url
+            pending[uuid] = command("showUI", linkedMapOf("uuid" to uuid, "url" to url))
+            log("airplay display UI selected uuid=$uuid url=$url")
+        }
+
+        private fun command(type: String, params: Map<String, Any?>): Map<String, Any?> =
+            linkedMapOf("type" to type, "params" to params)
+
+        private fun strings(value: Any?): List<String> = (value as? List<*>)
+            .orEmpty().filterIsInstance<String>().filter { it.isNotBlank() }.distinct()
     }
 }
