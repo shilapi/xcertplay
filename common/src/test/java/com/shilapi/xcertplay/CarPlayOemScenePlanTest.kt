@@ -34,6 +34,18 @@ class CarPlayOemScenePlanTest {
             OemScenePlan.build(layout, mapOf("z" to "map"), emptyMap()).remoteFrames.single())
     }
 
+    @Test fun remoteMaskUsesAssetRadiusAndBoundsMalformedGeometry() {
+        fun region(radius: Double) = OemScenePlan.build(mapOf("zones" to listOf(
+            zone("z", "dca", "map") + ("zoneShape" to mapOf("rectangular" to mapOf("cornerRadius" to radius)))
+        )), mapOf("z" to "map"), emptyMap()).remoteRegions.single()
+        assertEquals(OemRemoteRegion(OemFrame(660f, 120f, 600f, 480f), 56f), region(56.0))
+        assertEquals(0f, region(Double.NaN).cornerRadius, 0f)
+        assertEquals(0f, region(-1.0).cornerRadius, 0f)
+        assertEquals(240f, region(1000.0).cornerRadius, 0f)
+        assertEquals(0f, OemScenePlan.build(mapOf("zones" to listOf(zone("z", "mapsMedia", "map"))),
+            mapOf("z" to "map"), emptyMap()).remoteRegions.single().cornerRadius, 0f)
+    }
+
     @Test fun mapsMediaIsARemoteZoneAndInvalidTelemetryNeverBecomesZero() {
         val layout = mapOf("zones" to listOf(zone("z", "mapsMedia", "map"), zone("speed", "single", "g", "Speedometer")))
         val plan = OemScenePlan.build(layout, mapOf("z" to "map"), mapOf("vehicleSpeed" to Double.NaN, "vehicleSpeedUnit" to 1032L))

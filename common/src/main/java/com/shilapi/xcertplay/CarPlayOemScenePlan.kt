@@ -2,15 +2,17 @@ package com.shilapi.xcertplay
 
 /** Geometry in the OEM's complete video-frame coordinate system, not an independently scaled DCA. */
 internal data class OemFrame(val x: Float, val y: Float, val width: Float, val height: Float)
+internal data class OemRemoteRegion(val frame: OemFrame, val cornerRadius: Float)
 internal data class OemGauge(val frame: OemFrame, val source: String, val reading: Double?, val unit: String)
 internal data class OemArtwork(val frame: OemFrame, val identifier: String, val colorId: String?, val z: Int,
                                val persistent: Boolean = false)
 internal data class OemLocalSlot(val frame: OemFrame, val style: Map<*, *>, val rules: List<*>, val z: Int, val persistent: Boolean = false)
-internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: List<OemGauge>,
+internal data class OemScenePlan(val remoteRegions: List<OemRemoteRegion>, val gauges: List<OemGauge>,
                                  val localSlots: List<OemLocalSlot> = emptyList()) {
+    val remoteFrames: List<OemFrame> get() = remoteRegions.map { it.frame }
     companion object {
         fun build(layout: Map<String, Any?>, active: Map<String, String>, values: Map<String, Any?>): OemScenePlan {
-            val remote = mutableListOf<OemFrame>()
+            val remote = mutableListOf<OemRemoteRegion>()
             val gauges = mutableListOf<OemGauge>()
             val slots = mutableListOf<OemLocalSlot>()
             (layout["zones"] as? List<*>)?.forEach { raw ->
@@ -20,7 +22,12 @@ internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: L
                 val components = (zone["components"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
                 if (type.containsKey("dca") || type.containsKey("mapsMedia")) {
                     val selected = active[zone["id"]]
-                    if (selected != null && components.any { it["id"] == selected && it["type"] == "primary" }) remote += frame
+                    if (selected != null && components.any { it["id"] == selected && it["type"] == "primary" }) {
+                        val shape = zone["zoneShape"] as? Map<*, *> ?: zone["shape"] as? Map<*, *>
+                        val radius = ((shape?.get("rectangular") as? Map<*, *>)?.get("cornerRadius") as? Number)?.toFloat()
+                        remote += OemRemoteRegion(frame, radius?.takeIf { it.isFinite() && it >= 0f }
+                            ?.coerceAtMost(minOf(frame.width, frame.height) / 2f) ?: 0f)
+                    }
                 } else {
                     val selected = active[zone["id"]]
                     // An empty confirmed remote selection does not disable the single zone's local primary.

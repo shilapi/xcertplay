@@ -145,7 +145,7 @@ class CarPlayOemDeploymentTest {
         val data = request["data"] as Map<*, *>
         assertEquals("6C45CC47-EC01-527A-B40D-1316AA9C936F", data["layoutID"])
         assertEquals(mapOf("D6E7BC4C-744C-5944-BA96-8F578A31ED6D" to
-            "C1A48632-8A76-54EA-B1E9-D9D15A4EAF0E"), data["activeComponents"])
+            "8D56ED3C-CA1D-5110-B846-EC79FF4A2A93"), data["activeComponents"]) // DCA_Map
         assertEquals(1L, data["appearanceMode"])
         assertTrue(runtime.scene.uiConnected)
     }

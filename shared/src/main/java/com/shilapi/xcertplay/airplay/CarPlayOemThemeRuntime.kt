@@ -68,8 +68,14 @@ class CarPlayOemThemeDescriptor private constructor(private val values: Map<Stri
                 .filter { it["type"] == "primary" }.map { it["id"] as String }
         }
 
-    // Layout.new uses the first primary component in each DCA zone without persisted state.
-    fun initialComponents(id: String): Map<String, String> = remoteComponents(id).mapValues { (_, ids) -> ids.first() }
+    /** Request the asset's map component explicitly; asset order otherwise defaults to ADAS. */
+    fun initialComponents(id: String): Map<String, String> = sequence(layout(id)["zones"]).map(::dictionary)
+        .filter { dictionary(it["type"]).let { type -> type.containsKey("dca") || type.containsKey("mapsMedia") } }
+        .mapNotNull { zone ->
+            val primary = sequence(zone["components"]).map(::dictionary).filter { it["type"] == "primary" }
+            val selected = primary.firstOrNull { it["name"] == "DCA_Map" } ?: primary.firstOrNull()
+            selected?.let { (zone["id"] as String) to (it["id"] as String) }
+        }.toMap()
 
     fun resourcePath(identifier: String): String {
         val relative = dictionary(resources[identifier])["path"] as? String
@@ -176,7 +182,15 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     @Volatile var scene = CarPlayOemScene(descriptor.initialLayout, focusTokenId = newFocusToken(), hasFocus = true)
         private set
     @Volatile var listener: ((CarPlayOemScene) -> Unit)? = null
+    private val sceneListeners = mutableListOf<(CarPlayOemScene) -> Unit>()
     private val vehicleValuesListeners = mutableListOf<(Map<String, Any?>) -> Unit>()
+
+    /** Session-scoped observers independent of the Activity's replaceable rendering listener. */
+    @Synchronized fun addSceneListener(listener: (CarPlayOemScene) -> Unit): () -> Unit {
+        sceneListeners.add(listener)
+        listener(scene)
+        return { synchronized(this) { sceneListeners.removeAll { it === listener }; Unit } }
+    }
 
     /** Independent of the renderer listener; late subscribers receive the latest vehicle snapshot. */
     @Synchronized fun addVehicleValuesListener(listener: (Map<String, Any?>) -> Unit): () -> Unit {
@@ -466,6 +480,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         val vehicleValuesChanged = scene.vehicleValues != value.vehicleValues
         scene = value
         listener?.invoke(value)
+        sceneListeners.toList().forEach { it(value) }
         if (vehicleValuesChanged) vehicleValuesListeners.toList().forEach { it(value.vehicleValues) }
     }
 }

@@ -3,6 +3,7 @@ package com.shilapi.xcertplay
 import android.content.Context
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AirPlayContact
+import com.shilapi.xcertplay.airplay.CarPlayOemThemeRuntime
 import com.shilapi.xcertplay.airplay.AirPlayDisplayConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
 import com.shilapi.xcertplay.media.AndroidMediaSink
@@ -62,9 +63,9 @@ data class CarPlayWebDisplayConfig(
 }
 
 /**
- * Creates both displays as one session behind one HTTPS/WebSocket endpoint (HTTPS so browsers
- * expose WebCodecs). The phone's compressed
- * video is forwarded untouched for the browser to decode; the main display also carries decoded
+ * Creates both displays behind one HTTPS/WebSocket endpoint. Classic video is forwarded to the
+ * browser; an Ultra cluster instead encodes the phone layer plus the shared OEM instruments.
+ * The main display also carries decoded
  * audio down and touch up. Local decoding only happens for an enabled preview.
  */
 object CarPlayWebDisplayFactory {
@@ -93,20 +94,34 @@ object CarPlayWebDisplayFactory {
         configs: Map<Int, CarPlayWebDisplayConfig>,
         key: String,
         sendTouch: (List<AirPlayContact>) -> Boolean,
+        clusterRuntime: CarPlayOemThemeRuntime? = null,
     ): Session? {
         val enabled = configs.filterValues { it.enabled }
         if (enabled.isEmpty()) return null
         val channels = enabled.mapValues { (type, config) -> WebDisplayChannel(type, config.width, config.height) }
         val tls = WebDisplayCertificate.sslContext(File(context.noBackupFilesDir, CERTIFICATE_FILE), addresses())
         val server = WebDisplayServer(context.assets.open("carplay-display.html").use { it.readBytes() }, channels, key, sendTouch, tls = tls)
-        server.start(SOCKET_TIMEOUT_MS, true)
-        return Session(configs, channels, server)
+        val video = WebDisplayVideoOutput(channels, clusterRuntime != null && CLUSTER in channels)
+        val compositor = channels[CLUSTER]?.takeIf { clusterRuntime != null }?.let { channel ->
+            CarPlayClusterVideoCompositor(context, checkNotNull(clusterRuntime), channel.width, channel.height,
+                hasViewer = { channel.hasViewer }, onConfig = video::composedConfig,
+                onFrame = video::composedFrame,
+                onError = { error ->
+                    channel.setActive(false)
+                    android.util.Log.e("xcertplay-usb", "Cluster web compositor failed", error)
+                })
+        }
+        try { server.start(SOCKET_TIMEOUT_MS, true) }
+        catch (error: Exception) { compositor?.close(); server.stop(); throw error }
+        return Session(configs, channels, server, video, compositor)
     }
 
     class Session internal constructor(
         private val configs: Map<Int, CarPlayWebDisplayConfig>,
         private val displays: Map<Int, WebDisplayChannel>,
         private val server: WebDisplayServer,
+        private val video: WebDisplayVideoOutput,
+        private val compositor: CarPlayClusterVideoCompositor?,
     ) : MediaTap, Closeable {
         private val closed = AtomicBoolean(false)
         @Volatile private var sink: AndroidMediaSink? = null
@@ -115,13 +130,17 @@ object CarPlayWebDisplayFactory {
         fun bind(sink: AndroidMediaSink) {
             this.sink = sink
             sessions[sink] = this
-            displays.forEach { (type, display) -> display.keyFrameSource = { sink.requestKeyFrame(type) } }
+            displays.forEach { (type, display) ->
+                display.keyFrameSource = { if (type == CLUSTER && compositor != null) compositor.requestKeyFrame() else sink.requestKeyFrame(type) }
+            }
+            compositor?.let { sink.setSurface(CLUSTER, it.inputSurface) }
         }
 
         fun owns(type: Int) = displays.containsKey(type)
 
         @Synchronized fun preview(type: Int, surface: Surface?) {
             val target = surface.takeIf { configs[type]?.preview == true }
+            if (type == CLUSTER && compositor != null) { compositor.preview(target); return }
             val current = previews[type]
             if (current === target) return
             val sink = sink ?: return
@@ -130,9 +149,12 @@ object CarPlayWebDisplayFactory {
         }
 
         override fun forwardsVideo(type: Int) = displays.containsKey(type)
-        override fun onVideoConfig(type: Int, codec: VideoCodec, codecData: ByteArray) { displays[type]?.config(codec, codecData) }
-        override fun onVideoFrame(type: Int, accessUnit: ByteArray, arrivalUs: Long) { displays[type]?.frame(accessUnit, arrivalUs) }
-        override fun onVideoActive(type: Int, active: Boolean) { displays[type]?.setActive(active) }
+        override fun onVideoConfig(type: Int, codec: VideoCodec, codecData: ByteArray) { video.phoneConfig(type, codec, codecData) }
+        override fun onVideoFrame(type: Int, accessUnit: ByteArray, arrivalUs: Long) { video.phoneFrame(type, accessUnit, arrivalUs) }
+        override fun onVideoActive(type: Int, active: Boolean) {
+            if (type == CLUSTER) compositor?.remoteActive(active)
+            video.phoneActive(type, active)
+        }
         override fun takesAudio() = displays[MAIN]?.hasViewer == true
         override fun onAudioPcm(stream: Int, sampleRate: Int, channels: Int, pcm: ByteArray, offset: Int, length: Int) {
             displays[MAIN]?.audio(stream, sampleRate, channels, pcm, offset, length)
@@ -142,6 +164,7 @@ object CarPlayWebDisplayFactory {
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
             sink?.let { sessions.remove(it, this) }; sink = null
+            compositor?.close()
             server.stop()
         }
     }

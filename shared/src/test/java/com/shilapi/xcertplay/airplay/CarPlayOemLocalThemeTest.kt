@@ -18,6 +18,22 @@ class CarPlayOemLocalThemeTest {
     private fun CarPlayOemThemeDescriptor.layoutId(style: String) =
         layouts.first { it["layoutStyleID"] == style }["id"] as String
 
+    @Test fun initialLayoutRequestSelectsAssetMapRatherThanAdas() = deployed { runtime ->
+        for (layout in runtime.descriptor.layouts) {
+            val id = layout["id"] as String
+            val selected = runtime.descriptor.initialComponents(id)
+            val zones = layout["zones"] as List<*>
+            for (raw in zones) {
+                val zone = raw as Map<*, *>
+                val components = zone["components"] as List<*>
+                val map = components.filterIsInstance<Map<*, *>>().firstOrNull {
+                    it["type"] == "primary" && it["name"] == "DCA_Map"
+                } ?: continue
+                assertEquals("Map should be requested for ${layout["layoutStyleID"]}", map["id"], selected[zone["id"]])
+            }
+        }
+    }
+
     @Test fun palettesComeFromAssetLayoutStylesWithDefaultFirst() = deployed { runtime ->
         val d = runtime.descriptor
         assertEquals(listOf("custom"), d.palettes(d.layoutId("Cobranded")))

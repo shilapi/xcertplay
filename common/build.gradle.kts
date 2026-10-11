@@ -11,6 +11,7 @@ android {
 
     defaultConfig {
         minSdk = 28
+        testInstrumentationRunner = "com.shilapi.xcertplay.ClusterCompositorCheck"
     }
 
     compileOptions {

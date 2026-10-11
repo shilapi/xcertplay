@@ -3740,6 +3740,7 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
             key = AirPlayPersistence.webDisplayKey(this),
             sendTouch = { CarPlayBackgroundSession.snapshot()?.controller?.sendTouch(it) ?: false },
+            clusterRuntime = oemThemeRuntime.takeIf { airPlayConfig.ultra != null },
         )
         return try {
             AndroidMediaSink(
@@ -3791,6 +3792,9 @@ class CarPlayHostActivity : ComponentActivity() {
             { name -> assets.open("carplay-ultra/$name") }, trace = { appendLog(it) })
         val resolved = runtime.descriptor.resolveProfile(profile)
         runtime.selectInitialLayout(resolved["layoutIdentifier"] as String)
+        val themeRestored = CarPlayClusterThemePreference.restore(this, runtime)
+        CarPlayClusterThemePreference.observe(this, runtime)
+        appendLog("OEM theme preference restored=$themeRestored layout=${runtime.scene.layoutId} palette=${runtime.scene.paletteId}")
         stopOemVehicleProvider()
         oemThemeRuntime = runtime
         oemThemeView?.bind(runtime)
@@ -3800,7 +3804,7 @@ class CarPlayHostActivity : ComponentActivity() {
             "assetIdentity=${runtime.descriptor.assetId} contentVersion=${runtime.descriptor.version} " +
             "sdk=${runtime.descriptor.sdkVersion} appliedVersion=${runtime.appliedVersion} fullAPL=false")
         val provisioning = com.shilapi.xcertplay.airplay.CarPlayUltraVehicleProvisioning.create(
-            trace = { message -> appendLog(message) }, profile = resolved,
+            trace = { message -> appendLog(message) }, profile = resolved + ("layoutIdentifier" to runtime.scene.layoutId),
             themeAssetDirectory = directory, themeRuntime = runtime)
         val vehicle = provisioning.pluginRegistrations.single().handler as
             com.shilapi.xcertplay.airplay.rcs.caf.CafVehicleStatePlugin
@@ -3882,7 +3886,7 @@ class CarPlayHostActivity : ComponentActivity() {
             val current = scene.paletteId ?: descriptor.palette(scene.layoutId)
             scene.layoutId to palettes[(palettes.indexOf(current) + 1) % palettes.size]
         }
-        if (!runtime.selectLocalTheme(layoutId, paletteId)) {
+        if (!CarPlayClusterThemePreference.select(this, runtime, layoutId, paletteId)) {
             appendLog("Cluster theme follows the phone while UI Sync is connected")
         }
     }
