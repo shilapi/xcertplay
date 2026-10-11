@@ -38,6 +38,69 @@ class CarPlayOemDeploymentTest {
             (provisioning.pluginRegistrations.single().handler as CafVehicleStatePlugin).config)
     }
 
+    @Test fun defaultOemV3CommandsCarryDataBytesOnBothDisplays() =
+        checkProvisionedV3CommandWire(emptyMap(), "data", false)
+
+    @Test fun structuredV3CommandExperimentRequiresExplicitProfile() =
+        checkProvisionedV3CommandWire(mapOf("uiSyncV3CommandPayloadKey" to "payload",
+            "uiSyncV3CommandPayloadDictionary" to true), "payload", true)
+
+    private fun checkProvisionedV3CommandWire(profile: Map<String, Any?>,
+        key: String, dictionary: Boolean) = deployed { runtime ->
+        val traces = mutableListOf<String>()
+        val provisioning = CarPlayUltraVehicleProvisioning.create(themeRuntime = runtime,
+            profile = profile, trace = traces::add)
+        val stream = RcsDataStream.open(RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL,
+            ByteArray(32) { 3 }, ByteArray(32) { 4 })
+        try {
+            val port = stream.listen()
+            stream.attach(provisioning.rcsFactories.getValue(RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL)
+                .create(stream)!!)
+            RcsChannel.connect(InetSocketAddress("127.0.0.1", port),
+                ByteArray(32) { 4 }, ByteArray(32) { 3 }).use { phone ->
+                // Inspect the actual bytes without our permissive session decoder's data/payload aliases.
+                fun receive(display: String): Map<*, *> {
+                    val outer = OpackCodec.decode(phone.receiveNext(5_000)!!.body) as Map<*, *>
+                    assertEquals(display, outer["displayUUID"])
+                    assertTrue(outer["data"] is ByteArray)
+                    return BplistCodec.decode(outer["data"] as ByteArray) as Map<*, *>
+                }
+                fun send(display: String, type: Long, psn: Long, asn: Long) {
+                    phone.sendComm(OpackCodec.encode(mapOf("displayUUID" to display,
+                        "data" to BplistCodec.encode(mapOf("type" to type, "ssn" to 1L,
+                            "psn" to psn, "asn" to asn, "version" to 3L, "id" to "paired-phone")))))
+                }
+                for (display in listOf("Cluster_Display", "Center_Display")) {
+                    send(display, 0L, 1L, 0L)
+                    assertEquals(0L, receive(display)["type"])
+                    assertEquals(1L, receive(display)["type"])
+                    send(display, 1L, 1L, 1L)
+                    for ((type, psn) in listOf(5L to 3L, 17L to 4L)) {
+                        val session = receive(display)
+                        assertEquals(2L, session["type"])
+                        assertEquals(psn, session["psn"])
+                        assertFalse(session.containsKey(if (key == "data") "payload" else "data"))
+                        val command = if (dictionary) {
+                            assertTrue(session[key] is Map<*, *>)
+                            session[key] as Map<*, *>
+                        } else {
+                            assertTrue("Phone must receive command NSData, not an empty command", session[key] is ByteArray)
+                            BplistCodec.decode(session[key] as ByteArray) as Map<*, *>
+                        }
+                        assertEquals(type, command["type"])
+                        val fields = command["data"] as Map<*, *>
+                        if (type == 5L) {
+                            assertEquals(runtime.forDisplay(display).scene.layoutId, fields["layoutID"])
+                            assertFalse("Keep the fade-in experiment unchanged", fields.containsKey("fadeInNewLayout"))
+                        } else assertEquals(mapOf("allow" to true), fields)
+                    }
+                }
+            }
+            assertTrue(traces.any { it.contains("commandPayloadKey=$key") &&
+                it.contains("commandPayloadFormat=${if (dictionary) "dictionary" else "bplist"}") })
+        } finally { stream.close() }
+    }
+
     @Test fun requestUsesZoneToPrimaryComponentDictionary() = deployed { runtime ->
         val commands = runtime.initialCommands()
         // REQUEST_LAYOUT (0x05) then ALLOW_LAYOUT_CHANGE (0x11 {allow:true}); the asset's

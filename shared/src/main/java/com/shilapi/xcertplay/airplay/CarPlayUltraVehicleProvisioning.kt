@@ -130,11 +130,18 @@ object CarPlayUltraVehicleProvisioning {
             "peerReadyTimeoutMillis=${peerReadyTimeout ?: "off"} " +
             "overridden=${listOf("uiSyncUplinkVariant", "uiSyncUplinkProbeFrames")
                 .filter(deploymentProfile::containsKey)}")
-        val commandPayloadKey = deploymentProfile["uiSyncV3CommandPayloadKey"] as? String
-            ?: if (themeRuntime != null) "payload" else "data"
+        // ultra50: the phone ACKs the experimental payload/dictionary messages but logs
+        // COMMAND hasData=false. Default to the session's data NSData containing a command plist.
+        // Keep the experimental shape available only through an explicit deployment profile.
+        val commandPayloadKey = deploymentProfile["uiSyncV3CommandPayloadKey"] as? String ?: "data"
         require(commandPayloadKey == "data" || commandPayloadKey == "payload") { "Invalid UI Sync v3 command payload key" }
-        val payloadDictionary = deploymentProfile["uiSyncV3CommandPayloadDictionary"] as? Boolean ?: (themeRuntime != null)
+        val payloadDictionary = deploymentProfile["uiSyncV3CommandPayloadDictionary"] as? Boolean ?: false
         val omitFadeIn = deploymentProfile["uiSyncV3OmitFadeInNewLayout"] as? Boolean ?: (themeRuntime != null)
+        trace("Ultra UI Sync commandPayloadKey=$commandPayloadKey " +
+            "commandPayloadFormat=${if (payloadDictionary) "dictionary" else "bplist"} " +
+            "omitFadeInNewLayout=$omitFadeIn " +
+            "overridden=${listOf("uiSyncV3CommandPayloadKey", "uiSyncV3CommandPayloadDictionary",
+                "uiSyncV3OmitFadeInNewLayout").filter(deploymentProfile::containsKey)}")
         val probeBytes = (deploymentProfile["uiSyncRcsBackpressureProbeBytes"] as? Number)?.toInt() ?: 0
         // Opens with one APTransport sync frame so a phone-side rply can prove the read path.
         val transportSyncProbe = deploymentProfile["uiSyncTransportSyncProbe"] as? Boolean ?: false
