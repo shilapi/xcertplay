@@ -5,6 +5,38 @@ import org.junit.Test
 
 /** /info validation contract from AirPlaySender 24A437, including ultra2.log's proposal. */
 class AirPlayNegotiatedInfoTest {
+    @Test fun acceptedAltScreenCannotOmitItsDisplay() {
+        val config = config().let { it.copy(ultra = it.ultra!!.copy(declareClusterDisplay = false)) }
+        assertThrows(AirPlayConfigurationException::class.java) { info(config, null) }
+    }
+
+    @Test fun pixelAreaLimitUsesNegotiatedHevcAndIncludesTheBoundary() {
+        val config = config()
+        val enabled = AirPlayFeatureNegotiation.capabilities(config, true).supportedFeatureSet
+        fun withMain(height: Int) = config.copy(main = AirPlayDisplayConfig(4096, height))
+        assertNotNull(info(withMain(2176), enabled)) // 0x880000, accepted with HEVC.
+        assertThrows(AirPlayConfigurationException::class.java) { info(withMain(2177), enabled) }
+        assertNotNull(info(withMain(2304), enabled - AirPlayFeature.HEVC)) // 0x900000.
+        assertThrows(AirPlayConfigurationException::class.java) {
+            info(withMain(2305), enabled - AirPlayFeature.HEVC)
+        }
+        val oversizedCluster = config.copy(ultra = config.ultra!!.copy(cluster = AirPlayDisplayConfig(4096, 2177)))
+        assertThrows(AirPlayConfigurationException::class.java) { info(oversizedCluster, enabled) }
+    }
+
+    @Test fun dynamicDisplayUpdateUsesNegotiatedHevcBeforeSending() {
+        val output = mutableListOf<Map<String, Any?>>()
+        val control = CarPlayDisplayControlSession(config(), { output.add(it); true }, {})
+        control.negotiated(setOf(AirPlayFeature.VIEW_AREAS, AirPlayFeature.HEVC))
+        assertThrows(AirPlayConfigurationException::class.java) {
+            control.updateDisplay(AirPlayInfoPlist.MAIN_UUID, AirPlayDisplayConfig(4096, 2177))
+        }
+        assertTrue(output.isEmpty())
+        control.negotiated(setOf(AirPlayFeature.VIEW_AREAS))
+        control.updateDisplay(AirPlayInfoPlist.MAIN_UUID, AirPlayDisplayConfig(4096, 2304))
+        assertEquals("updateDisplayInfo", output.single()["type"])
+    }
+
     private fun config(): AirPlayConfig {
         val provisioning = CarPlayUltraVehicleProvisioning.create()
         return AirPlayConfig(

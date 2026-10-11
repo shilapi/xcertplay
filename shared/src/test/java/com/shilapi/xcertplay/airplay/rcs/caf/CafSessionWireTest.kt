@@ -5,6 +5,7 @@ import com.shilapi.xcertplay.airplay.CarPlayUltraVehicleProvisioning
 import com.shilapi.xcertplay.airplay.toInfoResponseMap
 import com.shilapi.xcertplay.airplay.rcs.RcsChannel
 import com.shilapi.xcertplay.airplay.rcs.RcsDataStream
+import com.shilapi.xcertplay.airplay.rcs.catalog.RcsClientTypes
 import com.shilapi.xcertplay.airplay.rcs.opack.OpackCodec
 import com.shilapi.xcertplay.airplay.rcs.transport.ApTransportPackageTest
 import com.shilapi.xcertplay.airplay.rcs.transport.RcsFrameCodec
@@ -16,6 +17,37 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CafSessionWireTest {
+    @Test
+    fun activeFirstRequestUsesOpackAndLaterResponsesFollowExplicitPeerFraming() {
+        val registry = CafPluginRegistry.from(CarPlayUltraVehicleProvisioning.create().pluginRegistrations)
+        val readKey = ByteArray(32) { 1 }
+        val writeKey = ByteArray(32) { 2 }
+        RcsDataStream.open(RcsClientTypes.CAR_PLAY_PROTOCOL_DATA, readKey, writeKey,
+            InetAddress.getByName("127.0.0.1")).use { stream ->
+            val session = CafProtocolSession(stream.clientType, stream, registry,
+                ProtocolCafConfigTreeDecoderFactory.FIRMWARE_V1)
+            stream.listen(session)
+            RcsChannel.connect(InetSocketAddress("127.0.0.1", stream.port), writeKey, readKey).use { phone ->
+                val pending = session.requestConfig(0)
+                val first = receiveRawOpack(phone)
+                assertEquals("configRequest", first["command"])
+                assertEquals(pending.transactionId, first["transactionID"])
+
+                // An explicitly wrapped peer remains compatible after the default changes.
+                val wrapped = CafRcsCodec.encode(
+                    CafEnvelope(0, CafMessage(CafCommand.CONFIG_REQUEST, 42)),
+                    CafPayloadEncoding.BINARY_PLIST, CafPayloadFraming.COMMAND_PARAMS_DATA,
+                )
+                phone.sendComm(wrapped.rcsBody)
+                val response = CafRcsCodec.decode(requireNotNull(phone.receiveNext(3000)).body)
+                assertEquals(CafPayloadEncoding.BINARY_PLIST, response.encoding)
+                assertEquals(CafPayloadFraming.COMMAND_PARAMS_DATA, response.framing)
+                assertEquals(CafCommand.CONFIG_RESPONSE, response.message.command)
+                assertEquals(42L, response.message.transactionId)
+            }
+        }
+    }
+
     @Test
     fun ultra5ConfigReplyHasAnAsynchronousHeaderOnTheEncryptedWire() {
         for (clientType in CafPluginRegistry.DEFAULT_CLIENT_TYPES) {

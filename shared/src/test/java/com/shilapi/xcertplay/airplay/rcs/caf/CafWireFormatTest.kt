@@ -7,13 +7,24 @@ import org.junit.Test
 
 class CafWireFormatTest {
     @Test
+    fun defaultConfigRequestUsesDirectDoubleOpack() {
+        val frame = CarAccessoryMessages.configRequest(7, 42)
+        val outer = OpackCodec.decode(frame.rcsBody) as Map<*, *>
+        assertFalse(outer.containsKey("params"))
+        assertEquals(7L, outer["pluginID"])
+        val inner = OpackCodec.decode(outer["pluginData"] as ByteArray) as Map<*, *>
+        assertEquals("configRequest", inner["command"])
+        assertEquals(42L, inner["transactionID"])
+    }
+
+    @Test
     fun ultra3RawOpackConfigRequestIsDecoded() {
         val envelope = CafRcsCodec.decode(ULTRA3_CONFIG_REQUEST)
 
         assertEquals(0L, envelope.pluginId)
         assertEquals(CafCommand.CONFIG_REQUEST, envelope.message.command)
         assertEquals(5800410672642552193L, envelope.message.transactionId)
-        assertEquals(CafPayloadEncoding.LEGACY_OPACK, envelope.encoding)
+        assertEquals(CafPayloadEncoding.OPACK, envelope.encoding)
         assertEquals(CafPayloadFraming.DIRECT, envelope.framing)
     }
 

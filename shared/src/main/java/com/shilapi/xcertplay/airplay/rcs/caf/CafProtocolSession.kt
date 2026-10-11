@@ -23,8 +23,8 @@ class CafProtocolSession(
     private val plugins: CafPluginRegistry,
     private val decoderFactory: CafConfigTreeDecoderFactory,
     val transactions: CafTransactionTracker = CafTransactionTracker(),
-    private var encoding: CafPayloadEncoding = CafPayloadEncoding.BINARY_PLIST,
-    private var framing: CafPayloadFraming = CafPayloadFraming.COMMAND_PARAMS_DATA,
+    private var encoding: CafPayloadEncoding = CafPayloadEncoding.OPACK,
+    private var framing: CafPayloadFraming = CafPayloadFraming.DIRECT,
 ) : RcsDataStreamHandler, Closeable {
     init {
         require(clientType.payloadStyle == RcsPayloadStyle.CAF_BINARY_PLIST_OPACK) {

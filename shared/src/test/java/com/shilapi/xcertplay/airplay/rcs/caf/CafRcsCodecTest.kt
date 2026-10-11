@@ -13,8 +13,11 @@ import org.junit.Test
 
 class CafRcsCodecTest {
     @Test
-    fun configRequestUsesBinaryPlistBlobs() {
-        val frame = CarAccessoryMessages.configRequest(pluginId = 7, transactionId = 42)
+    fun explicitBinaryPlistWrapperRemainsSupported() {
+        val frame = CafRcsCodec.encode(
+            CarAccessoryMessages.configRequest(pluginId = 7, transactionId = 42).envelope,
+            CafPayloadEncoding.BINARY_PLIST, CafPayloadFraming.COMMAND_PARAMS_DATA,
+        )
         @Suppress("UNCHECKED_CAST")
         val wrapper = BplistCodec.decode(frame.rcsBody) as Map<Any?, Any?>
         @Suppress("UNCHECKED_CAST")

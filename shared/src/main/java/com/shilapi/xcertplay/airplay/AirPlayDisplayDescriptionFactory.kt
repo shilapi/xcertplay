@@ -36,10 +36,18 @@ object AirPlayDisplayDescriptionFactory {
         )
     }
 
-    fun create(display: AirPlayDisplayConfig, type: Int, uuid: String): Map<String, Any?> {
+    fun create(display: AirPlayDisplayConfig, type: Int, uuid: String, hevc: Boolean = false): Map<String, Any?> {
         val views = viewAreas(display)
         val indices = views.map { it["viewAreaIndex"] as Int }
         require(display.widthPixels > 0 && display.heightPixels > 0) { "Display $uuid has invalid pixels" }
+        // AirPlaySender 24A437 selects the cap by hevcInfo presence, not screen count.
+        val maxPixelArea = if (hevc) 0x880000L else 0x900000L
+        val pixelArea = display.widthPixels.toLong() * display.heightPixels
+        if (pixelArea > maxPixelArea) {
+            throw AirPlayConfigurationException(
+                "Display $uuid pixel area $pixelArea exceeds $maxPixelArea (hevc=$hevc)",
+            )
+        }
         require(indices.distinct().size == indices.size && display.initialViewArea in indices) {
             "Display $uuid has duplicate indices or unknown initialViewArea"
         }

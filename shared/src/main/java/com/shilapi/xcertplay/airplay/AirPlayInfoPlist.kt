@@ -38,13 +38,17 @@ object AirPlayInfoPlist {
             "/info cannot describe features unsupported by this receiver"
         }
         val clusterDisplay = config.ultra?.takeIf { it.declareClusterDisplay }?.cluster
+        val hevc = AirPlayFeature.HEVC in responseFeatures
         val displays = arrayListOf<Map<String, Any?>>(
-            AirPlayDisplayDescriptionFactory.create(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID),
+            AirPlayDisplayDescriptionFactory.create(config.main, STREAM_TYPE_MAIN_SCREEN, MAIN_UUID, hevc),
         )
         if (AirPlayFeature.ALT_SCREEN in responseFeatures) {
             clusterDisplay?.let {
-                displays.add(AirPlayDisplayDescriptionFactory.create(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID))
+                displays.add(AirPlayDisplayDescriptionFactory.create(it, STREAM_TYPE_ALT_SCREEN, ALT_UUID, hevc))
             }
+        }
+        if ((AirPlayFeature.ALT_SCREEN in responseFeatures) != (displays.size >= 2)) {
+            throw AirPlayConfigurationException("altScreen must match /info displays count (${displays.size})")
         }
 
         val info = linkedMapOf<String, Any?>(

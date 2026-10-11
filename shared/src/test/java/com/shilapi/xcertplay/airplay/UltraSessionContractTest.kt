@@ -46,11 +46,11 @@ class UltraSessionContractTest {
         assertEquals(1, calls)
         assertEquals(2, output.count { it.type == CarPlayUiSyncMessageType.COMMAND_ACK })
     }
-    @Test fun legacyOpackAndBinaryPlistAreBothDecodedWithoutChangingNegotiatedEncoding() {
+    @Test fun opackAndExplicitBinaryPlistAreBothDecodedWithoutChangingEncoding() {
         val request = CarAccessoryMessages.configRequest(7, 8)
-        val legacy = CafRcsCodec.encode(request.envelope, CafPayloadEncoding.LEGACY_OPACK)
-        assertEquals(CafPayloadEncoding.LEGACY_OPACK, CafRcsCodec.decode(legacy.rcsBody).encoding)
-        assertEquals(CafPayloadEncoding.BINARY_PLIST, CafRcsCodec.decode(request.rcsBody).encoding)
+        val binary = CafRcsCodec.encode(request.envelope, CafPayloadEncoding.BINARY_PLIST)
+        assertEquals(CafPayloadEncoding.OPACK, CafRcsCodec.decode(request.rcsBody).encoding)
+        assertEquals(CafPayloadEncoding.BINARY_PLIST, CafRcsCodec.decode(binary.rcsBody).encoding)
     }
     @Test fun defaultVehicleContainsWritableStateAndDocumentedNumericTypes() {
         val provisioning = CarPlayUltraVehicleProvisioning.create()

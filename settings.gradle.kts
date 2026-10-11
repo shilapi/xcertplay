@@ -27,4 +27,7 @@ include(":common")
 include(":mobile")
 include(":automotive")
 include(":shared")
-include(":panellab")
+// Optional local experiments; this directory is not part of a normal checkout.
+if (file("panellab").isDirectory) {
+    include(":panellab")
+}

@@ -22,8 +22,8 @@ object AirPlayEventCommands {
         return command("updateViewArea", mapOf("uuid" to uuid, "viewAreaIndex" to index,
             "adjacentViewAreas" to adjacent, "animationDurationMillis" to animationMillis))
     }
-    fun updateDisplayInfo(display: AirPlayDisplayConfig, type: Long, uuid: String) =
-        command("updateDisplayInfo", AirPlayDisplayDescriptionFactory.create(display, type.toInt(), uuid))
+    fun updateDisplayInfo(display: AirPlayDisplayConfig, type: Long, uuid: String, hevc: Boolean = false) =
+        command("updateDisplayInfo", AirPlayDisplayDescriptionFactory.create(display, type.toInt(), uuid, hevc))
     fun nightMode(night: Boolean, uuid: String? = null) = command("setNightMode",
         linkedMapOf<String, Any?>("nightMode" to night).apply { uuid?.let { put("uuid", it) } })
     fun limitedUi(uuid: String, limited: Boolean) = command("setLimitedUI", mapOf("uuid" to uuid, "limitedUI" to limited))

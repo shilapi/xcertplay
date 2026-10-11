@@ -19,7 +19,8 @@ internal class CarPlayDisplayControlSession(private val config: AirPlayConfig,
     }
     @Synchronized fun updateDisplay(uuid: String, display: AirPlayDisplayConfig) {
         require(uuid in displays) { "Unknown displayUUID=$uuid" }
-        val command = AirPlayEventCommands.updateDisplayInfo(display, if (uuid == AirPlayInfoPlist.MAIN_UUID) 110 else 111, uuid)
+        val hevc = enabled?.contains(AirPlayFeature.HEVC) ?: config.hevc
+        val command = AirPlayEventCommands.updateDisplayInfo(display, if (uuid == AirPlayInfoPlist.MAIN_UUID) 110 else 111, uuid, hevc)
         displays[uuid] = display
         queue("display:$uuid", command, required(uuid, AirPlayFeature.VIEW_AREAS))
     }

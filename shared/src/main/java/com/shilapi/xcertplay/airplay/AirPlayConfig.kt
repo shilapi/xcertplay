@@ -238,7 +238,8 @@ data class AirPlayUltraConfig(
     val centerDisplayPluginId: String? = null,
     /**
      * Diagnostic A/B: when false the `/info` response omits the cluster display and its
-     * `displayPanels`, so the phone never sees a DDP display it has no asset layout for.
+     * `displayPanels`. This is valid only when altScreen is also absent from the response;
+     * `/info` rejects advertising altScreen without the second display.
      * Flipped from the on-device profile key `ultraDeclareClusterDisplay`. Default keeps the
      * shipping behaviour.
      */

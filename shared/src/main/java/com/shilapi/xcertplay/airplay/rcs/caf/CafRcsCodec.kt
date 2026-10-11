@@ -4,8 +4,8 @@ import com.shilapi.xcertplay.airplay.BplistCodec
 import com.shilapi.xcertplay.airplay.rcs.RcsMessage
 import com.shilapi.xcertplay.airplay.rcs.opack.OpackCodec
 
-/** Blob encoding is independent of the RCS body framing. */
-enum class CafPayloadEncoding { BINARY_PLIST, LEGACY_OPACK }
+/** CarData uses OPACK for both blobs; explicit binary-plist peers remain supported. */
+enum class CafPayloadEncoding { OPACK, BINARY_PLIST }
 
 /** Direct comm bodies are observed on the wire; command wrappers remain supported. */
 enum class CafPayloadFraming { DIRECT, COMMAND_PARAMS_DATA }
@@ -93,7 +93,7 @@ object CafRcsCodec {
         return CafEnvelope(
             pluginId,
             message,
-            if (isPlist(outerBytes)) CafPayloadEncoding.BINARY_PLIST else CafPayloadEncoding.LEGACY_OPACK,
+            if (isPlist(outerBytes)) CafPayloadEncoding.BINARY_PLIST else CafPayloadEncoding.OPACK,
             framing,
         )
     }
@@ -103,7 +103,7 @@ object CafRcsCodec {
 
     private fun encodeBlob(value: Any?, encoding: CafPayloadEncoding): ByteArray = when (encoding) {
         CafPayloadEncoding.BINARY_PLIST -> BplistCodec.encode(value)
-        CafPayloadEncoding.LEGACY_OPACK -> OpackCodec.encode(value)
+        CafPayloadEncoding.OPACK -> OpackCodec.encode(value)
     }
 
     private fun decodeBlob(bytes: ByteArray): Any? =
