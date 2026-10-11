@@ -95,6 +95,37 @@ class CarPlayOemDeploymentTest {
                         } else assertEquals(mapOf("allow" to true), fields)
                     }
                 }
+                fun command(display: String, psn: Long, type: Long, fields: Map<String, Any?>) {
+                    val payload = mapOf("type" to type, "data" to fields)
+                    phone.sendComm(OpackCodec.encode(mapOf("displayUUID" to display,
+                        "data" to mapOf("type" to 2L, "ssn" to 1L, "psn" to psn, "asn" to 4L,
+                            "data" to payload))))
+                    val ack = receive(display)
+                    assertEquals(3L, ack["type"])
+                    assertEquals(psn, ack["asn"])
+                }
+                // ultra51 Center completion has no layoutChange. A business rejection on either
+                // display must still ACK and leave both sessions usable on the shared RCS channel.
+                val center = runtime.forDisplay("Center_Display")
+                command("Center_Display", 2L, 6L, mapOf("layoutID" to center.scene.layoutId))
+                command("Cluster_Display", 2L, 3L, mapOf("layoutID" to runtime.scene.layoutId,
+                    "activeComponents" to mapOf("bad-zone" to "bad-component")))
+                command("Center_Display", 3L, 6L, mapOf("layoutID" to center.scene.layoutId,
+                    "paletteID" to "blue", "appearanceMode" to 1L,
+                    "activeComponents" to emptyMap<String, String>(), "fadeOutOldLayout" to true))
+                assertFalse(center.scene.layoutConfirmed)
+                center.onVideoFrame(158131106249L)
+                assertTrue(center.scene.layoutConfirmed)
+                command("Cluster_Display", 3L, 9L, mapOf("isTransitioning" to true))
+                command("Cluster_Display", 4L, 3L, mapOf("layoutID" to runtime.scene.layoutId,
+                    "paletteID" to "custom", "activeComponents" to runtime.descriptor.initialComponents(runtime.scene.layoutId)))
+                runtime.onVideoFrame(158131122917L)
+                assertTrue(runtime.scene.transitioning)
+                command("Cluster_Display", 5L, 6L, mapOf("layoutID" to runtime.scene.layoutId))
+                runtime.onVideoFrame(158131156250L)
+                assertTrue(runtime.scene.layoutConfirmed)
+                assertTrue(center.scene.uiConnected)
+                assertTrue(runtime.scene.uiConnected)
             }
             assertTrue(traces.any { it.contains("commandPayloadKey=$key") &&
                 it.contains("commandPayloadFormat=${if (dictionary) "dictionary" else "bplist"}") })

@@ -132,7 +132,8 @@ class CafSessionWireTest {
                     val eligible = Ios27CafWireContract.characteristics(tree)
                         .filter { it["mutable"] == true || !it.containsKey("initialValue") }
                         .map { (it["iid"] as Number).toLong() }
-                    assertEquals(listOf(100L, 101L, 110L), eligible)
+                    assertEquals(listOf(100L, 101L, 110L), eligible.filter { it < 3000 })
+                    assertEquals((3000L..3013L).toSet(), eligible.filter { it >= 3000 }.toSet())
 
                     // Follow-up packets use the observed raw OPACK schema, independently of CafRcsCodec.
                     phone.sendComm(rawRequest("registerRequest", 10, eligible))

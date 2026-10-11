@@ -3495,9 +3495,15 @@ class CarPlayHostActivity : ComponentActivity() {
         appendLog("OEM deployment source=APK profileOverride=${profileFile.exists()} " +
             "assetIdentity=${runtime.descriptor.assetId} contentVersion=${runtime.descriptor.version} " +
             "sdk=${runtime.descriptor.sdkVersion} appliedVersion=${runtime.appliedVersion} fullAPL=false")
-        return com.shilapi.xcertplay.airplay.CarPlayUltraVehicleProvisioning.create(
+        val provisioning = com.shilapi.xcertplay.airplay.CarPlayUltraVehicleProvisioning.create(
             trace = { message -> appendLog(message) }, profile = resolved,
             themeAssetDirectory = directory, themeRuntime = runtime)
+        val vehicle = provisioning.pluginRegistrations.single().handler as
+            com.shilapi.xcertplay.airplay.rcs.caf.CafVehicleStatePlugin
+        val bridge = com.shilapi.xcertplay.airplay.rcs.caf.CafVehicleTelemetryBridge(vehicle)
+        // 新建 runtime 只绑定一次；后台会话保留 runtime，发布链随之保留。
+        runtime.addVehicleValuesListener(bridge::publish)
+        return provisioning
     }
 
     private fun updateAltScreenTransform() {

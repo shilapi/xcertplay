@@ -166,6 +166,8 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     private val frameCommands = java.util.ArrayDeque<CarPlayUiSyncCommandPayload>()
     private var lastMetadataPtsUs = 0L
     private var pendingLayoutId: String? = null
+    private var requestedLayoutId: String? = null
+    private var targetAppearance = 1
     private val frameCommandTypes = setOf(CarPlayUiSyncCommand.METADATA_TRANSFER,
         CarPlayUiSyncCommand.TRANSITION_START, CarPlayUiSyncCommand.TRANSITION_DATA,
         CarPlayUiSyncCommand.TRANSITION_END, CarPlayUiSyncCommand.LAYOUT_CHANGE,
@@ -174,6 +176,14 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
     @Volatile var scene = CarPlayOemScene(descriptor.initialLayout, focusTokenId = newFocusToken(), hasFocus = true)
         private set
     @Volatile var listener: ((CarPlayOemScene) -> Unit)? = null
+    private val vehicleValuesListeners = mutableListOf<(Map<String, Any?>) -> Unit>()
+
+    /** Independent of the renderer listener; late subscribers receive the latest vehicle snapshot. */
+    @Synchronized fun addVehicleValuesListener(listener: (Map<String, Any?>) -> Unit): () -> Unit {
+        vehicleValuesListeners.add(listener)
+        listener(scene.vehicleValues)
+        return { synchronized(this) { vehicleValuesListeners.removeAll { it === listener }; Unit } }
+    }
     val loaded: Boolean get() = archive != null
     // The verified bundled archive is declared applied; the full OEM script/rendering contract is still partial.
     val appliedVersion: Long get() = if (loaded) descriptor.version else 0
@@ -191,6 +201,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
 
     @Synchronized fun initialCommands(): List<CarPlayUiSyncCommandPayload> {
         check(loaded) { "OEM theme must load before UI Sync ready" }
+        requestedLayoutId = scene.layoutId
         publish(scene.copy(uiConnected = true, layoutConfirmed = false, paletteId = scene.paletteId ?: descriptor.palette(scene.layoutId)))
         // The verified asset sends allowLayoutChange(true) on every UI Sync connect, in both the
         // remote-UI-visible branch (after REQUEST_LAYOUT) and the hidden branch (before
@@ -212,7 +223,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         trace("OEM local theme layout=$layoutId style=${descriptor.layout(layoutId)["layoutStyleID"]} palette=$paletteId")
         return true
     }
-    @Synchronized fun disconnect() { frameCommands.clear(); lastMetadataPtsUs = 0; pendingLayoutId = null; publish(scene.copy(uiConnected = false, transitioning = false,
+    @Synchronized fun disconnect() { frameCommands.clear(); lastMetadataPtsUs = 0; pendingLayoutId = null; requestedLayoutId = null; publish(scene.copy(uiConnected = false, transitioning = false,
         layoutConfirmed = false, vehicleValues = emptyMap(), metadata = emptyMap(), transitionData = emptyMap(),
         focusTokenId = newFocusToken(), hasFocus = true)) }
 
@@ -247,7 +258,16 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
                 val id = command.fields["layoutID"] as? String ?: error("OEM layout completion ID missing")
                 descriptor.layout(id)
                 val started = frameCommands.lastOrNull { it.command == CarPlayUiSyncCommand.LAYOUT_CHANGE }
-                require((started?.fields?.get("layoutID") ?: pendingLayoutId) == id) { "OEM layout completion requires matching phone start" }
+                val expected = started?.fields?.get("layoutID") ?: pendingLayoutId
+                require(expected == id || (expected == null && isRequestedCompletion(command.fields))) {
+                    "OEM layout completion requires matching phone start or requested layout confirmation"
+                }
+                validateLayoutStart(command.fields)
+            }
+            if (command.command == CarPlayUiSyncCommand.LAYOUT_CHANGE ||
+                command.command == CarPlayUiSyncCommand.END_LAYOUT_CHANGE) {
+                validateLayoutAppearance(command.fields)
+                if (command.fields.containsKey("pts")) transitionPtsUs(command.fields)
             }
             frameCommands.addLast(command.copy(fields = LinkedHashMap(command.fields)))
             trace("OEM transition queued type=${command.command.wireName} pending=${frameCommands.size}")
@@ -264,7 +284,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         val end = presentationTimeUs + frameDurationUs
         while (frameCommands.isNotEmpty()) {
             val next = frameCommands.peekFirst() ?: break
-            if (next.command == CarPlayUiSyncCommand.TRANSITION_DATA && transitionPtsUs(next.fields) >= end) break
+            if (next.fields.containsKey("pts") && transitionPtsUs(next.fields) >= end) break
             frameCommands.removeFirst()
             if (scene.metadata["isTransitioning"] != true && next.command != CarPlayUiSyncCommand.METADATA_TRANSFER &&
                 next.command != CarPlayUiSyncCommand.END_LAYOUT_CHANGE) {
@@ -307,37 +327,71 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         return id to active
     }
 
+    private fun isRequestedCompletion(data: Map<String, Any?>): Boolean =
+        scene.uiConnected && requestedLayoutId != null && data["layoutID"] == requestedLayoutId &&
+            data.containsKey("activeComponents") && data.containsKey("paletteID") && data.containsKey("appearanceMode")
+
+    private fun appearanceMode(raw: Any?): Int {
+        require(raw is Long || raw is Int) { "OEM appearance must be an integer" }
+        val mode = (raw as Number).toLong()
+        require(mode in 0L..1L) { "Invalid OEM appearance mode" }
+        return mode.toInt()
+    }
+
+    private fun resolvedAppearance(target: Int = targetAppearance, preference: Int = scene.appearancePreference): Int =
+        if (descriptor.display["requiresDarkAppearance"] == true || preference == 2) 1
+        else if (preference == 1) 0 else target
+
+    private fun validateLayoutAppearance(data: Map<String, Any?>) {
+        if (data.containsKey("paletteID")) {
+            val palette = data["paletteID"] as? String ?: throw IllegalArgumentException("OEM paletteID missing")
+            descriptor.validatePalette(data["layoutID"] as String, palette)
+        }
+        if (data.containsKey("appearanceMode")) appearanceMode(data["appearanceMode"])
+    }
+
+    private fun layoutAppearance(data: Map<String, Any?>, id: String): Pair<String, Int> {
+        if (data.containsKey("appearanceMode")) targetAppearance = appearanceMode(data["appearanceMode"])
+        val palette = data["paletteID"] as? String ?:
+            if (id == scene.layoutId) scene.paletteId ?: descriptor.palette(id) else descriptor.palette(id)
+        return palette to resolvedAppearance()
+    }
+
     private fun apply(command: CarPlayUiSyncCommandPayload): List<CarPlayUiSyncCommandPayload> {
         val data = command.fields
         when (command.command) {
             CarPlayUiSyncCommand.LAYOUT_CHANGE -> {
                 val (id, active) = validateLayoutStart(data)
+                val (palette, appearance) = layoutAppearance(data, id)
                 pendingLayoutId = id
                 publish(scene.copy(layoutId = id, transitioning = true, layoutConfirmed = false,
-                    paletteId = if (id == scene.layoutId) scene.paletteId ?: descriptor.palette(id) else descriptor.palette(id),
+                    paletteId = palette, appearance = appearance,
                     activeComponents = active))
             }
             CarPlayUiSyncCommand.END_LAYOUT_CHANGE -> {
-                require(pendingLayoutId != null) { "OEM layout completion requires phone layout start" }
-                val id = data["layoutID"] as? String ?: error("OEM layout completion ID missing")
-                require(id == pendingLayoutId) { "OEM layout completion ID mismatch" }
+                val (id, active) = validateLayoutStart(data)
+                require(id == pendingLayoutId || (pendingLayoutId == null && isRequestedCompletion(data))) {
+                    "OEM layout completion ID mismatch"
+                }
+                val (palette, appearance) = layoutAppearance(data, id)
                 pendingLayoutId = null
-                publish(scene.copy(transitioning = false, layoutConfirmed = true))
+                requestedLayoutId = null
+                publish(scene.copy(layoutId = id, paletteId = palette, appearance = appearance,
+                    activeComponents = if (data.containsKey("activeComponents")) active else scene.activeComponents,
+                    transitionData = if (data.containsKey("regions")) LinkedHashMap(data) else scene.transitionData,
+                    transitioning = false, layoutConfirmed = true))
                 trace("OEM layout confirmed layoutID=$id activeComponents=${scene.activeComponents} appliedVersion=$appliedVersion")
             }
             CarPlayUiSyncCommand.TARGET_APPEARANCE_CHANGE -> {
-                val raw = data["appearanceMode"]
-                require(raw is Long || raw is Int) { "OEM appearance must be an integer" }
-                val mode = (raw as Number).toLong(); require(mode in 0L..1L)
-                publish(scene.copy(appearance = if (descriptor.display["requiresDarkAppearance"] == true) 1 else mode.toInt()))
+                targetAppearance = appearanceMode(data["appearanceMode"])
+                publish(scene.copy(appearance = resolvedAppearance()))
             }
             CarPlayUiSyncCommand.APPEARANCE_PREFERENCE_CHANGE -> {
                 val raw = data["preference"]
                 require(raw is Long || raw is Int) { "OEM appearance preference must be an integer" }
                 val preference = (raw as Number).toLong(); require(preference in 0L..2L)
-                val appearance = if (descriptor.display["requiresDarkAppearance"] == true || preference == 2L) 1
-                    else if (preference == 1L) 0 else scene.appearance
-                publish(scene.copy(appearancePreference = preference.toInt(), appearance = appearance))
+                publish(scene.copy(appearancePreference = preference.toInt(),
+                    appearance = resolvedAppearance(preference = preference.toInt())))
             }
             CarPlayUiSyncCommand.REQUEST_LAYOUT -> return listOf(requestLayout(scene.layoutId))
             CarPlayUiSyncCommand.PALETTE_CHANGE -> {
@@ -349,8 +403,7 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
             }
             CarPlayUiSyncCommand.METADATA_TRANSFER -> {
                 val transitioning = data["isTransitioning"] as? Boolean ?: error("OEM metadata transition marker missing")
-                publish(scene.copy(metadata = LinkedHashMap(data),
-                    transitionData = if (transitioning) scene.transitionData else emptyMap()))
+                publish(scene.copy(metadata = LinkedHashMap(data)))
                 if (!transitioning) lastMetadataPtsUs = 0
             }
             CarPlayUiSyncCommand.GIVE_FOCUS -> {
@@ -390,9 +443,18 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         publish(scene.copy(vehicleValues = LinkedHashMap(scene.vehicleValues).apply { putAll(values) }))
     }
 
-    fun readResource(identifier: String): ByteArray {
-        val file = archive ?: error("OEM runtime not loaded")
+    /** 字体目录只允许读取图集文件，不能执行其中的 LayoutData.lua。 */
+    fun readFontResource(identifier: String, filename: String): ByteArray {
+        require(filename == "$identifier.png") { "Invalid OEM font filename" }
         val path = descriptor.resourcePath(identifier)
+        require(path.startsWith("r/Cluster_Display/Fonts/") && path.substringAfterLast('/') == identifier)
+        return readArchiveResource("$path/$filename")
+    }
+
+    fun readResource(identifier: String): ByteArray = readArchiveResource(descriptor.resourcePath(identifier))
+
+    private fun readArchiveResource(path: String): ByteArray {
+        val file = archive ?: error("OEM runtime not loaded")
         return ZipFile(file).use { zip ->
             val entry = zip.getEntry(path) ?: error("OEM resource missing $path")
             require(entry.size in 1..8L * 1024 * 1024) { "OEM resource exceeds limit" }
@@ -400,7 +462,12 @@ class CarPlayOemThemeRuntime(val descriptor: CarPlayOemThemeDescriptor,
         }
     }
 
-    private fun publish(value: CarPlayOemScene) { scene = value; listener?.invoke(value) }
+    private fun publish(value: CarPlayOemScene) {
+        val vehicleValuesChanged = scene.vehicleValues != value.vehicleValues
+        scene = value
+        listener?.invoke(value)
+        if (vehicleValuesChanged) vehicleValuesListeners.toList().forEach { it(value.vehicleValues) }
+    }
 }
 
 /** Loads APK resources, verifies/stages the archive, then supplies one coherent default profile. */

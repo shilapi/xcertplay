@@ -3,12 +3,16 @@ package com.shilapi.xcertplay
 /** Geometry in the OEM's complete video-frame coordinate system, not an independently scaled DCA. */
 internal data class OemFrame(val x: Float, val y: Float, val width: Float, val height: Float)
 internal data class OemGauge(val frame: OemFrame, val source: String, val reading: Double?, val unit: String)
-internal data class OemArtwork(val frame: OemFrame, val identifier: String, val colorId: String?, val z: Int)
-internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: List<OemGauge>) {
+internal data class OemArtwork(val frame: OemFrame, val identifier: String, val colorId: String?, val z: Int,
+                               val persistent: Boolean = false)
+internal data class OemLocalSlot(val frame: OemFrame, val style: Map<*, *>, val rules: List<*>, val z: Int, val persistent: Boolean = false)
+internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: List<OemGauge>,
+                                 val localSlots: List<OemLocalSlot> = emptyList()) {
     companion object {
         fun build(layout: Map<String, Any?>, active: Map<String, String>, values: Map<String, Any?>): OemScenePlan {
             val remote = mutableListOf<OemFrame>()
             val gauges = mutableListOf<OemGauge>()
+            val slots = mutableListOf<OemLocalSlot>()
             (layout["zones"] as? List<*>)?.forEach { raw ->
                 val zone = raw as? Map<*, *> ?: return@forEach
                 val frame = frame(zone["frame"]) ?: return@forEach
@@ -18,7 +22,26 @@ internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: L
                     val selected = active[zone["id"]]
                     if (selected != null && components.any { it["id"] == selected && it["type"] == "primary" }) remote += frame
                 } else {
-                    components.forEach componentLoop@ { component ->
+                    val selected = active[zone["id"]]
+                    // An empty confirmed remote selection does not disable the single zone's local primary.
+                    // Multiple local alternatives require a matching selection; overlays are never gauges.
+                    val primary = components.filter { it["type"] == "primary" || it["type"] == null }
+                    val chosen = if (selected != null) primary.filter { it["id"] == selected }
+                        else if (primary.size == 1) primary else emptyList()
+                    chosen.forEach componentLoop@ { component ->
+                        (component["slots"] as? List<*>)?.forEach slotLoop@ { rawSlot ->
+                            val slot = rawSlot as? Map<*, *> ?: return@slotLoop
+                            val local = frame(slot["frame"]) ?: return@slotLoop
+                            val instrument = slot["instrument"] as? Map<*, *> ?: return@slotLoop
+                            val gauge = (((instrument["kind"] as? Map<*, *>)?.get("gauge") as? Map<*, *>)
+                                ?.get("configuration") as? Map<*, *>) ?: return@slotLoop
+                            if (gauge["rendersLocally"] != true) return@slotLoop
+                            val style = gauge["style"] as? Map<*, *> ?: return@slotLoop
+                            slots += OemLocalSlot(local.copy(x = frame.x + local.x, y = frame.y + local.y), style,
+                                (gauge["visibilityConfiguration"] as? Map<*, *>)?.get("rules") as? List<*> ?: emptyList<Any>(),
+                                (slot["zIndex"] as? Number)?.toInt() ?: 0,
+                                (instrument["configuration"] as? Map<*, *>)?.get("persistent") == true)
+                        }
                         val declaredSources = linkedSetOf<String>()
                         collectReadingIdentifiers(component["slots"], declaredSources)
                         val source = declaredSources.firstOrNull { it == "vehicleSpeed" || it == "engineRPM" } ?: when (component["name"]) {
@@ -27,14 +50,15 @@ internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: L
                             else -> return@componentLoop
                         }
                         val unit = if (source == "vehicleSpeed") speedUnit(values["vehicleSpeedUnit"]) else "rpm"
-                        val reading = (values[source] as? Number)?.toDouble()?.takeIf {
+                        val reading = telemetryNumber(values[source],
+                            if (source == "vehicleSpeed") values["vehicleSpeedUnit"] else null)?.takeIf {
                             it.isFinite() && it >= 0 && unit.isNotEmpty()
                         }
                         gauges += OemGauge(frame, source, reading, unit)
                     }
                 }
             }
-            return OemScenePlan(remote, gauges)
+            return OemScenePlan(remote, gauges, slots.sortedBy { it.z })
         }
 
         private fun collectReadingIdentifiers(value: Any?, into: MutableSet<String>) {
@@ -78,7 +102,8 @@ internal data class OemScenePlan(val remoteFrames: List<OemFrame>, val gauges: L
                         val id = image["identifier"] as? String ?: return@slotLoop
                         result += OemArtwork(slotFrame.copy(x = zoneFrame.x + slotFrame.x, y = zoneFrame.y + slotFrame.y),
                             id, (state["tintColorIDs"] as? Map<*, *>)?.get("0") as? String,
-                            (slot["zIndex"] as? Number)?.toInt() ?: 0)
+                            (slot["zIndex"] as? Number)?.toInt() ?: 0,
+                                (instrument["configuration"] as? Map<*, *>)?.get("persistent") == true)
                     }
                 }
             }

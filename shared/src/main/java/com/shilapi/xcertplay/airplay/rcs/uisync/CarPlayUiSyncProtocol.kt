@@ -3,10 +3,14 @@ package com.shilapi.xcertplay.airplay.rcs.uisync
 import com.shilapi.xcertplay.airplay.BplistCodec
 import com.shilapi.xcertplay.airplay.rcs.RcsMessage
 
-class CarPlayUiSyncProtocolException(
+open class CarPlayUiSyncProtocolException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
+
+/** A well-formed OEM command whose numeric type the asset does not dispatch (LayoutController.lua logs and continues). */
+class CarPlayUiSyncUnknownCommandException(val type: Long) :
+    CarPlayUiSyncProtocolException("Unknown OEM UI command type $type")
 
 enum class CarPlayUiSyncMessageType(val wireName: String, val wireValue: Long) {
     RESET("reset", 0),
@@ -81,7 +85,7 @@ enum class CarPlayUiSyncCommand(val wireName: String) {
             0x14L to DRIVE_MODE_CHANGE,
         )
         fun fromAssetType(value: Long): CarPlayUiSyncCommand = assetTypes[value]
-            ?: throw CarPlayUiSyncProtocolException("Unknown OEM UI command type $value")
+            ?: throw CarPlayUiSyncUnknownCommandException(value)
         fun assetType(command: CarPlayUiSyncCommand): Long = assetTypes.entries.firstOrNull { it.value == command }?.key
             ?: throw CarPlayUiSyncProtocolException("Command has no confirmed OEM wire type: $command")
         fun fromWireName(value: String): CarPlayUiSyncCommand =

@@ -136,8 +136,14 @@ class CarPlayUiSyncSession(
                     rx = message.packetSequenceNumber
                     acknowledge(message.acknowledgementSequenceNumber)
                     if (message.type == CarPlayUiSyncMessageType.COMMAND) {
-                        val command = message.commandPayload() ?: throw CarPlayUiSyncProtocolException("command requires data")
-                        onCommand(command)
+                        val command = try {
+                            message.commandPayload() ?: throw CarPlayUiSyncProtocolException("command requires data")
+                        } catch (unknown: CarPlayUiSyncUnknownCommandException) {
+                            // Asset parity: "Unhandled command of type" is logged; the session stays up.
+                            trace("UI Sync unhandled OEM command type=${unknown.type} psn=${message.packetSequenceNumber}; ignored")
+                            null
+                        }
+                        command?.let(onCommand)
                     }
                 } else trace("UI Sync duplicate command psn=${message.packetSequenceNumber} lastRx=$rx")
                 if (message.type == CarPlayUiSyncMessageType.COMMAND && !message.noAck)
@@ -410,7 +416,16 @@ class CarPlayUiSyncHandlerFactory(
             val engine = target.engine
             onConfiguration(payload)
             target.runtime?.let { runtime ->
-                runtime.handle(payload).forEach(engine::command)
+                // ultra51: one rejected phone command closed the whole ClusterControl channel. A theme
+                // command the local runtime cannot apply is logged and dropped; the session stays up.
+                val replies = try { runtime.handle(payload) } catch (error: RuntimeException) {
+                    if (error !is IllegalArgumentException && error !is IllegalStateException) throw error
+                    stream.traceProtocol("OEM UI command rejected displayUUID=${target.displayUuid} " +
+                        "command=${payload.command.wireName} reason=${error.message} " +
+                        "fields=${ProtocolTraceFormatter.pretty(payload.fields)}")
+                    return
+                }
+                replies.forEach(engine::command)
                 stream.traceProtocol("OEM UI displayUUID=${target.displayUuid} command=${payload.command.wireName} layout=${runtime.scene.layoutId} " +
                     "transitioning=${runtime.scene.transitioning} backend=android-declarative-experimental")
                 return

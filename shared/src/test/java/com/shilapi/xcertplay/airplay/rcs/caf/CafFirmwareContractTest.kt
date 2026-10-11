@@ -28,7 +28,8 @@ class CafFirmwareContractTest {
         val characteristics = Ios27CafWireContract.characteristics(referenceConfig())
         // Use type IDs here so an incorrect identifier key cannot hide the mutable failure.
         assertEquals(setOf(0x31000017L, 0x31000019L, 0x31000012L),
-            characteristics.filter { it["mutable"] == true || !it.containsKey("initialValue") }
+            characteristics.filter { (it["iid"] as Number).toLong() < 3000 &&
+                    (it["mutable"] == true || !it.containsKey("initialValue")) }
                 .map { (it["type"] as Number).toLong() }.toSet())
         assertEquals(false, characteristics.single { it["type"] == 0x46000005L }["mutable"])
     }

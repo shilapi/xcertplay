@@ -60,6 +60,7 @@ object CarPlayUltraVehicleProvisioning {
                 CafConfigTreeFactory.characteristic(0x36000065, 111, CafCharacteristicFormat.STRING, "seat_front_left")),
             ),
         )))
+        accessories += CafVehicleTelemetryBridge.referenceAccessories()
         if (requestContent) {
             accessories += CafConfigTreeFactory.accessory(0x01200001, 2,
                 requestContentZones.mapIndexed { index, zone ->
@@ -165,7 +166,14 @@ object CarPlayUltraVehicleProvisioning {
             "assumptions=local-climate-state,current-temperature-range=-40..100/0.1,fixed-temperature-unit=0," +
             "fan-range-0..7,climate-region=seat_front_left,ui-layout-default; no vehicle hardware attached")
         val handler = CafVehicleStatePlugin(pluginId, vehicleConfig,
-            writeToVehicle = { id, value -> trace("TRACE Ultra local vehicle write instanceID=$id value=$value") })
+            writeToVehicle = { id, value ->
+                trace("TRACE Ultra local vehicle write instanceID=$id value=$value")
+                // These IIDs belong to our reference tree only. OEM profiles own their write mapping.
+                if (!deploymentProfile.containsKey("config")) {
+                    val key = when (id) { 100L -> "climateTargetTemperature"; 110L -> "climateFanLevel"; else -> null }
+                    key?.let { themeRuntime?.updateVehicleValues(mapOf(it to value)) }
+                }
+            })
         return AirPlayUltraProvisioning(
             pluginRegistrations = listOf(CafPluginRegistration(pluginId,
                 CafPluginRegistry.CAF_PROTOCOL_VERSION_1_0,

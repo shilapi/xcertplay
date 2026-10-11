@@ -44,6 +44,24 @@ class CarPlayOemScenePlanTest {
         assertNull(OemScenePlan.frame(listOf(listOf(0, 0), listOf(-1, 1))))
     }
 
+    @Test fun localSlotsSelectOnePrimaryAndKeepAbsolutePersistentGeometry() {
+        val slot = mapOf("frame" to listOf(listOf(147.0, 211.5), listOf(306.0, 177.0)),
+            "instrument" to mapOf("configuration" to mapOf("persistent" to true), "kind" to mapOf("gauge" to
+                mapOf("configuration" to mapOf("rendersLocally" to true, "style" to mapOf("textElement" to emptyMap<String, Any?>()))))))
+        val primary = mapOf("id" to "one", "type" to "primary", "name" to "Speedometer", "slots" to listOf(slot))
+        val overlay = primary + mapOf("id" to "overlay", "type" to "overlay")
+        val z = zone("z", "single", "one").toMutableMap().apply { put("components", listOf(primary, overlay)) }
+        val layout = mapOf("zones" to listOf(z))
+        val plan = OemScenePlan.build(layout, emptyMap(), emptyMap())
+        assertEquals(1, plan.localSlots.size)
+        assertEquals(OemFrame(807f, 331.5f, 306f, 177f), plan.localSlots.single().frame)
+        assertTrue(plan.localSlots.single().persistent)
+        assertTrue(OemScenePlan.build(layout, mapOf("z" to "foreign"), emptyMap()).localSlots.isEmpty())
+        z["components"] = listOf(primary, primary + ("id" to "two"))
+        assertTrue(OemScenePlan.build(layout, emptyMap(), emptyMap()).localSlots.isEmpty())
+        assertEquals(1, OemScenePlan.build(layout, mapOf("z" to "two"), emptyMap()).localSlots.size)
+    }
+
     @Test fun artworkKeepsSlotCoordinatesAndExcludesVerifiedOrConditionalIndicators() {
         fun slot(identifier: String, verified: Boolean = false, conditional: Boolean = false): Map<String, Any?> {
             val image = mapOf("type" to mapOf("image" to mapOf("_0" to mapOf("identifier" to identifier))))

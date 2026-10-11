@@ -9,6 +9,18 @@ class CarPlayClusterDashboardTest {
         return (0 until (seconds / step).toInt()).map { vehicle.advance(step) }
     }
 
+    @Test fun assetRadialGaugeOpensDownwardOnScreen() {
+        // manifest main gauge: minimumAngle 135°, maximumAngle 45°, clockwise — opening at the bottom.
+        val (start, sweep) = ClusterSlotGauge.angles(Math.toRadians(135.0), Math.toRadians(45.0), true)
+        assertEquals(135f, start, 0.01f); assertEquals(270f, sweep, 0.01f)
+        val mid = Math.toRadians((start + sweep * 0.5f).toDouble())
+        assertTrue("half progress must sit at the top (y-down)", kotlin.math.sin(mid) < -0.99)
+        // counter-clockwise secondary arc 131° → 49° passes through the bottom (90°).
+        val (s2, w2) = ClusterSlotGauge.angles(Math.toRadians(131.0), Math.toRadians(49.0), false)
+        assertEquals(-82f, w2, 0.05f)
+        assertTrue(kotlin.math.sin(Math.toRadians((s2 + w2 * 0.5f).toDouble())) > 0.99)
+    }
+
     @Test fun mockLoopStaysInsidePlausibleRanges() {
         val samples = drive(CarPlayClusterMockVehicle.LOOP_SECONDS * 2)
         samples.forEach { v ->
@@ -104,6 +116,46 @@ class CarPlayClusterDashboardTest {
         assertEquals(100.0, value.value!!, 0.0)
         assertFalse(value.step(null, 0.016))
         assertNull(value.value)
+    }
+
+    private fun textSlot(kind: String, config: Map<String, Any?>) = OemLocalSlot(
+        OemFrame(177f, 241.5f, 306f, 177f), mapOf("textElement" to mapOf("configuration" to
+            mapOf("dataType" to mapOf(kind to mapOf("configuration" to config))))), emptyList<Any>(), 2)
+
+    @Test fun nativeTelemetryUsesSelectedUnitAndTransmissionPosition() {
+        val r = ClusterReadings.from(mapOf("vehicleSpeed" to mapOf("1032" to 100.0, "1033" to 62.0),
+            "vehicleSpeedUnit" to 1033L, "transmission" to mapOf("mode" to 68L, "position" to 4L)))
+        assertEquals(62.0, r.speed!!, 0.0)
+        assertEquals("D4", r.gearLabel)
+        val slot = textSlot("gearPosition", mapOf("gaugeVersion" to "numericalOnly"))
+        assertEquals("4", ClusterSlotContent.text(slot, r)!!.value)
+        assertEquals("", ClusterSlotContent.text(slot, ClusterReadings.from(mapOf("transmission" to 0)))!!.value)
+        assertEquals("", ClusterReadings.from(emptyMap()).speedUnit)
+    }
+
+    @Test fun secondarySpeedRequiresExplicitEnableAndUsesAssetUnitLabels() {
+        val slot = textSlot("secondarySpeedWithUnit", mapOf("dataIdentifier" to "vehicleSpeed",
+            "unitDataIdentifier" to "vehicleSpeedUnit", "showSecondarySpeedDataIdentifier" to "showSecondarySpeed"))
+        val values = mapOf("vehicleSpeed" to 100.0, "vehicleSpeedUnit" to 1032L)
+        assertNull(ClusterSlotContent.text(slot, ClusterReadings.from(values)))
+        assertEquals("62 mph", ClusterSlotContent.text(slot,
+            ClusterReadings.from(values + ("showSecondarySpeed" to true)))!!.value)
+        val unit = textSlot("speedUnit", mapOf("unitDataIdentifier" to "vehicleSpeedUnit",
+            "labelConfiguration" to mapOf("unitLabels" to mapOf("1032" to "km/h"))))
+        assertEquals("km/h", ClusterSlotContent.text(unit, ClusterReadings.from(values))!!.value)
+        assertEquals("—", ClusterSlotContent.text(unit, ClusterReadings.from(emptyMap()))!!.value)
+    }
+
+    @Test fun assetTemperatureAndAppearanceAreResolvedWithoutInventedUnits() {
+        val slot = textSlot("temperature", mapOf("dataIdentifiers" to mapOf("dataIdentifier" to "engineTemperature",
+            "temperatureUnitDataIdentifier" to "temperatureUnit"), "labelConfiguration" to mapOf(
+                "unitLabels" to mapOf("1081" to "°F", "1082" to "°C"))))
+        assertEquals("212°F", ClusterSlotContent.text(slot,
+            ClusterReadings.from(mapOf("engineTemperature" to 100.0, "temperatureUnit" to 1081L)))!!.value)
+        val definition = mapOf("dynamic" to mapOf("value" to mapOf(
+            "darkMode" to mapOf("stops" to mapOf("0.0" to "#ffffffff")),
+            "lightMode" to mapOf("stops" to mapOf("0.0" to "#000000ff")))))
+        assertEquals(0xFF000000.toInt(), ClusterColors.argb(definition, 0))
     }
 
     @Test fun zonesComeFromLayoutGauges() {

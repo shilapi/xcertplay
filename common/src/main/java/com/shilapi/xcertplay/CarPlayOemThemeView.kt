@@ -6,7 +6,6 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.RectF
@@ -43,6 +42,7 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         bindGeneration++
         val generation = bindGeneration
         logo?.recycle(); logo = null
+        dashboard.fonts?.recycle(); dashboard.fonts = null
         artwork.forEach { it.second.recycle() }; artwork = emptyList(); artworkLayout = null
         runtime = value; scene = value?.scene; colorCache = null
         ownedListener = value?.let { host -> { state: CarPlayOemScene -> post {
@@ -55,6 +55,8 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         value?.listener = ownedListener
         // Read actual OEM artwork; never invent a manufacturer logo.
         value?.let { host ->
+            dashboard.fonts = CarPlayOemRasterFonts(host::readFontResource,
+                context.assets.open("carplay-ultra/font-metrics.bplist").use { it.readBytes() })
             runCatching {
                 val item = host.descriptor.cluster["manufacturerLogo"] as Map<*, *>
                 val type = item["type"] as Map<*, *>
@@ -83,32 +85,25 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         canvas.translate((width - host.descriptor.clusterWidth * scale) / 2,
             (height - host.descriptor.clusterHeight * scale) / 2)
         canvas.scale(scale, scale)
-        val active = state.activeComponents.ifEmpty { runCatching { host.descriptor.initialComponents(state.layoutId) }.getOrDefault(emptyMap()) }
-        val plan = OemScenePlan.build(layout, active, state.vehicleValues)
-        // Phone video is already in full display coordinates. Keep remote zones transparent;
-        // mask its other pixels so phone content cannot bleed through locally rendered instruments.
-        val mask = Path().apply {
-            addRect(0f, 0f, host.descriptor.clusterWidth.toFloat(), host.descriptor.clusterHeight.toFloat(), Path.Direction.CW)
-            plan.remoteFrames.forEach { frame ->
-                val remote = Path().apply { addRect(frame.x, frame.y, frame.x + frame.width, frame.y + frame.height, Path.Direction.CW) }
-                op(remote, Path.Op.DIFFERENCE)
-            }
+        val active = if (state.layoutConfirmed) state.activeComponents else state.activeComponents.ifEmpty {
+            runCatching { host.descriptor.initialComponents(state.layoutId) }.getOrDefault(emptyMap())
         }
-        resetPaint()
-        paint.color = Color.BLACK
-        canvas.drawPath(mask, paint)
+        val plan = OemScenePlan.build(layout, active, state.vehicleValues)
+        // 手机视频是整屏背景；只合成本地仪表，并在远端组件区域裁去本地图层。
+        val localLayer = canvas.saveLayer(0f, 0f, host.descriptor.clusterWidth.toFloat(), host.descriptor.clusterHeight.toFloat(), null)
 
         val style = ClusterDialStyle.of(layout["layoutStyleID"])
         val palette = state.paletteId ?: host.descriptor.palette(state.layoutId)
-        val colors = colorsFor(host, state.layoutId, palette, style)
+        val colors = colorsFor(host, state.layoutId, palette, style, state.appearance)
+        dashboard.resolveColor = { id -> resolveColor(host, state, id) }
         val zones = ClusterZones.from(layout, plan)
         dashboard.drawBackground(canvas, style, zones)
-        artwork.forEach { (item, bitmap) ->
+        artwork.filterNot { it.first.persistent }.forEach { (item, bitmap) ->
             resetPaint()
             resolveColor(host, state, item.colorId)?.let { paint.colorFilter = PorterDuffColorFilter(it, PorterDuff.Mode.SRC_IN) }
             canvas.drawBitmap(bitmap, null, item.frame.rect(), paint)
         }
-        if (style != ClusterDialStyle.MAPS_MEDIA) logo?.let { image ->
+        if (!zones.assetDriven && style != ClusterDialStyle.MAPS_MEDIA) logo?.let { image ->
             val ratio = min(180f / image.width, 48f / image.height)
             val w = image.width * ratio; val h = image.height * ratio
             resetPaint(); paint.color = Color.WHITE
@@ -116,7 +111,32 @@ class CarPlayOemThemeView(context: Context) : View(context) {
                 (host.descriptor.clusterWidth + w) / 2, 660f + h), paint)
         }
         val moving = smooth(ClusterReadings.from(state.vehicleValues))
-        dashboard.draw(canvas, style, colors, zones, smoothed) { frame -> artwork.any { (item, _) -> frame.contains(item.frame) } }
+        dashboard.draw(canvas, style, colors, zones.copy(localSlots = zones.localSlots.filterNot { it.persistent }), smoothed) {
+            frame -> artwork.any { (item, _) -> frame.contains(item.frame) }
+        }
+        resetPaint()
+        paint.xfermode = android.graphics.PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+        plan.remoteFrames.forEach { canvas.drawRect(it.rect(), paint) }
+        OemPopover.from(layout, state.transitionData).forEach { popover ->
+            val checkpoint = canvas.save()
+            val t = popover.transform
+            val matrix = android.graphics.Matrix().apply {
+                setValues(floatArrayOf(t[0], t[2], t[4], t[1], t[3], t[5], 0f, 0f, 1f))
+            }
+            canvas.concat(matrix)
+            paint.alpha = (popover.opacity * 255).toInt()
+            canvas.drawRoundRect(popover.frame.rect(), popover.radius, popover.radius, paint)
+            canvas.restoreToCount(checkpoint)
+        }
+        paint.xfermode = null
+        canvas.restoreToCount(localLayer)
+        // persistent 读数在资产中独立于可裁切布局层。
+        artwork.filter { it.first.persistent }.forEach { (item, bitmap) ->
+            resetPaint()
+            resolveColor(host, state, item.colorId)?.let { paint.colorFilter = PorterDuffColorFilter(it, PorterDuff.Mode.SRC_IN) }
+            canvas.drawBitmap(bitmap, null, item.frame.rect(), paint)
+        }
+        dashboard.drawPersistent(canvas, colors, zones, smoothed)
         canvas.restoreToCount(saved)
         if (moving) postInvalidateOnAnimation()
     }
@@ -133,10 +153,10 @@ class CarPlayOemThemeView(context: Context) : View(context) {
         return moving
     }
 
-    private fun colorsFor(host: CarPlayOemThemeRuntime, layoutId: String, palette: String, style: ClusterDialStyle): ClusterColors {
-        val key = "$layoutId/$palette"
+    private fun colorsFor(host: CarPlayOemThemeRuntime, layoutId: String, palette: String, style: ClusterDialStyle, appearance: Int): ClusterColors {
+        val key = "$layoutId/$palette/$appearance"
         colorCache?.takeIf { it.first == key }?.let { return it.second }
-        val resolved = ClusterColors.resolve(style) { id ->
+        val resolved = ClusterColors.resolve(style, appearance) { id ->
             runCatching { host.descriptor.colorDefinition(layoutId, palette, id) }.getOrNull()
         }
         colorCache = key to resolved

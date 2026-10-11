@@ -6,6 +6,10 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.SweepGradient
+import android.graphics.Matrix
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Typeface
 import java.util.Locale
 import kotlin.math.cos
@@ -24,11 +28,15 @@ internal class CarPlayClusterDashboardRenderer {
     private val light = Typeface.create(Typeface.SANS_SERIF, 300, false)
     private val label = Typeface.create(Typeface.SANS_SERIF, 400, false)
     private val arcRect = RectF()
+    var fonts: CarPlayOemRasterFonts? = null
+    var resolveColor: (String) -> Int? = { null }
 
-    data class Zones(val speed: OemFrame?, val rpm: OemFrame?, val centerSpeed: OemFrame?, val outsideTemperature: OemFrame?)
+    data class Zones(val speed: OemFrame?, val rpm: OemFrame?, val centerSpeed: OemFrame?, val outsideTemperature: OemFrame?,
+                     val localSlots: List<OemLocalSlot> = emptyList(), val assetDriven: Boolean = false)
 
     /** Dial faces; drawn before the asset's decorative artwork so that artwork stays visible on top. */
     fun drawBackground(canvas: Canvas, style: ClusterDialStyle, zones: Zones) {
+        if (zones.assetDriven) return
         listOfNotNull(zones.speed, zones.rpm).forEach { f ->
             when (style) {
                 ClusterDialStyle.MAPS_MEDIA -> Unit
@@ -40,6 +48,13 @@ internal class CarPlayClusterDashboardRenderer {
 
     fun draw(canvas: Canvas, style: ClusterDialStyle, colors: ClusterColors, zones: Zones, r: ClusterReadings,
              hasArtwork: (OemFrame) -> Boolean) {
+        if (zones.assetDriven || zones.localSlots.isNotEmpty()) {
+            drawSlots(canvas, zones.localSlots, colors, r)
+            if (r.simulated) text(canvas, "SIMULATED DATA", 960f,
+                if (style == ClusterDialStyle.MAPS_MEDIA) 34f else 96f, 18f,
+                ClusterColors.withAlpha(colors.detailText, 0x80), label, letterSpacing = 0.18f)
+            return
+        }
         when (style) {
             ClusterDialStyle.MODULAR -> {
                 zones.speed?.let { modularSpeed(canvas, it, colors, r) }
@@ -57,6 +72,206 @@ internal class CarPlayClusterDashboardRenderer {
         }
         if (r.simulated) text(canvas, "SIMULATED DATA", 960f, if (style == ClusterDialStyle.MAPS_MEDIA) 34f else 96f,
             18f, ClusterColors.withAlpha(colors.detailText, 0x80), label, letterSpacing = 0.18f)
+    }
+
+    fun drawPersistent(canvas: Canvas, colors: ClusterColors, zones: Zones, r: ClusterReadings) {
+        drawSlots(canvas, zones.localSlots.filter { it.persistent }, colors, r)
+    }
+
+    private fun drawSlots(canvas: Canvas, slots: List<OemLocalSlot>, c: ClusterColors, r: ClusterReadings) {
+        slots.forEach { slot ->
+            val f = slot.frame
+            val saved = canvas.save()
+            // 槽位是定位 frame，不是裁切框；线头与 centerOffset 可以延伸到 frame 外。
+            drawAssetTicks(canvas, slot, c, r)
+            ClusterSlotGauge.progress(slot, r)?.let { g ->
+                val fill = g.colorId?.let(resolveColor) ?: if (g.background) c.track else
+                    if (g.redline) c.redline else if (g.secondary) c.secondary else c.primary
+                g.radial?.let { cfg ->
+                    val angles = cfg["angleConfiguration"] as? Map<*, *> ?: return@let
+                    val from = (angles["minimumAngle"] as? Number)?.toDouble() ?: return@let
+                    val to = (angles["maximumAngle"] as? Number)?.toDouble() ?: return@let
+                    val clockwise = angles["clockwise"] == true
+                    val (start, sweep) = ClusterSlotGauge.angles(from, to, clockwise)
+                    val width = (cfg["trackWidth"] as? Number)?.toFloat() ?: return@let
+                    val inset = (cfg["trackInset"] as? Number)?.toFloat() ?: 0f
+                    val radius = min(f.width, f.height) / 2 - inset - width / 2
+                    if (radius > 0 && width > 0) {
+                        paint.reset(); paint.isAntiAlias = true
+                        paint.style = Paint.Style.STROKE; paint.strokeWidth = width
+                        paint.strokeCap = assetCap(cfg["trackLineCap"])
+                        val cx = f.x + f.width / 2; val cy = f.y + f.height / 2
+                        arcRect.set(cx - radius, cy - radius, cx + radius, cy + radius)
+                        paint.color = fill
+                        val end = if (g.redline || g.background) 1f else g.fraction
+                        when {
+                            g.gradient -> {
+                                // 资产使用整圆遮罩和随进度旋转的 CONICAL 渐变，不能裁成实色进度弧。
+                                val fixedStop = (0.25f + kotlin.math.abs(sweep) / 360f * g.fraction).coerceAtMost(0.999f)
+                                val alpha = (android.graphics.Color.alpha(fill) *
+                                    (0.2f + 0.8f * min(1f, g.fraction / 0.5f))).roundToInt()
+                                val bright = (fill and 0x00ffffff) or (alpha shl 24)
+                                val clear = fill and 0x00ffffff
+                                val shader = SweepGradient(cx, cy, intArrayOf(bright, bright, clear, clear, clear),
+                                    floatArrayOf(0f, 0.0001f, fixedStop, 0.9999f, 1f))
+                                val transform = Matrix()
+                                // 渐变从当前进度端向已走过的圆周方向淡出。
+                                transform.setScale(1f, if (clockwise) -1f else 1f, cx, cy)
+                                transform.postRotate(start + sweep * g.fraction, cx, cy)
+                                shader.setLocalMatrix(transform)
+                                paint.shader = shader
+                                paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
+                                canvas.drawCircle(cx, cy, radius, paint)
+                                paint.shader = null
+                                paint.xfermode = null
+                            }
+                            g.platter && g.colorId != null -> {
+                                paint.style = Paint.Style.FILL
+                                val platterInset = (cfg["platterInset"] as? Number)?.toFloat() ?: 0f
+                                canvas.drawCircle(cx, cy, min(f.width, f.height) / 2 - platterInset, paint)
+                            }
+                            g.platter -> Unit
+                            g.fullCircle -> canvas.drawCircle(cx, cy, radius, paint)
+                            end > g.startFraction -> canvas.drawArc(arcRect, start + sweep * g.startFraction,
+                                sweep * (end - g.startFraction), false, paint)
+                        }
+                    }
+                }
+                g.linear?.let { cfg ->
+                    val left = (cfg["leftInset"] as? Number)?.toFloat() ?: 0f
+                    val right = (cfg["rightInset"] as? Number)?.toFloat() ?: 0f
+                    val width = (cfg["trackWidth"] as? Number)?.toFloat() ?: min(14f, f.height)
+                    val w = f.width - left - right
+                    val offset = (cfg["centerOffset"] as? Number)?.toFloat() ?: 0f
+                    val end = if (g.redline || g.background) 1f else g.fraction
+                    if (w > 0 && width > 0 && end > g.startFraction) {
+                        paint.reset(); paint.isAntiAlias = true; paint.style = Paint.Style.STROKE
+                        paint.strokeWidth = width; paint.strokeCap = Paint.Cap.ROUND; paint.color = fill
+                        val rtl = cfg["isRTL"] == true
+                        fun x(p: Float) = f.x + left + w * if (rtl) 1f - p else p
+                        val y = f.y + f.height / 2 + offset
+                        canvas.drawLine(x(g.startFraction), y, x(end), y, paint)
+                    }
+                }
+            }
+            ClusterSlotContent.text(slot, r)?.let { content ->
+                drawAssetText(canvas, content, if (content.large) c.largeText else c.detailText)
+            }
+            canvas.restoreToCount(saved)
+        }
+    }
+
+    /** cap=0 的 ROUND 对应由 DigiRing 两端 atan((width/2)/radius) 的精确补偿支持；
+     * 其余值保持平端，BUTT/SQUARE 的宿主枚举排列尚未直接查证。 */
+    private fun assetCap(raw: Any?): Paint.Cap = if ((raw as? Number)?.toInt() == 0) Paint.Cap.ROUND else Paint.Cap.BUTT
+
+    private fun drawAssetText(canvas: Canvas, content: ClusterSlotText, fallbackColor: Int) {
+        val config = content.configuration
+        val font = fonts?.get((config["font"] as? Map<*, *>)?.get("name") as? String ?: "")
+        val unitFont = fonts?.get((config["unitFont"] as? Map<*, *>)?.get("name") as? String ?: "") ?: font
+        val f = content.frame
+        val unit = content.unit
+        val value = if (unit.isNotEmpty()) content.value.removeSuffix(unit).trimEnd() else content.value
+        val tracking = (config["valueTracking"] as? Number)?.toFloat() ?: 0f
+        val spacing = if (unit.isNotEmpty() && value.isNotEmpty()) (config["labelSpacing"] as? Number)?.toFloat() ?: 0f else 0f
+        val offset = (config["valueYOffset"] as? Number)?.toFloat() ?: 0f
+        val colorIds = config["colorIDs"] as? Map<*, *>
+        fun color(key: String) = ((colorIds?.get(key) as? Map<*, *>)?.get("0") as? String)?.let(resolveColor) ?: fallbackColor
+        if (font != null && unitFont != null) {
+            val valueWidth = font.width(value, tracking) + spacing
+            val unitWidth = unitFont.width(unit)
+            val x = when ((config["alignment"] as? Number)?.toInt()) {
+                1 -> 0f
+                2 -> (f.width - valueWidth - unitWidth).coerceAtLeast(0f)
+                4 -> (f.width / 2 - valueWidth / 2).coerceAtLeast(0f)
+                else -> ((f.width - valueWidth - unitWidth) / 2).coerceAtLeast(0f)
+            }
+            val baselineMode = (config["offsetType"] as? Number)?.toInt() == 2
+            val y = if (baselineMode) f.height - font.baselineOffset - offset else (f.height - font.height) / 2 + offset
+            font.draw(canvas, value, f.x + x, f.y + y, color("valueColorIDs"), tracking)
+            val unitY = if (baselineMode) f.height - unitFont.height - offset else (f.height - font.height) / 2
+            unitFont.draw(canvas, unit, f.x + x + valueWidth, f.y + unitY, color("unitColorIDs"))
+            return
+        }
+        paint.reset(); paint.isAntiAlias = true; paint.typeface = if (content.large) digits else label
+        paint.textSize = content.pointSize
+        val measured = paint.measureText(content.value)
+        val x = when ((config["alignment"] as? Number)?.toInt()) {
+            1 -> f.x
+            2 -> f.x + (f.width - measured).coerceAtLeast(0f)
+            else -> f.x + ((f.width - measured) / 2).coerceAtLeast(0f)
+        }
+        val metrics = paint.fontMetrics
+        val y = if ((config["offsetType"] as? Number)?.toInt() == 2) f.y + offset else
+            f.y + (f.height - (metrics.descent - metrics.ascent)) / 2 - metrics.ascent + offset
+        paint.color = color("valueColorIDs"); paint.textAlign = Paint.Align.LEFT
+        canvas.drawText(content.value, x, y, paint)
+    }
+
+    private fun drawAssetTicks(canvas: Canvas, slot: OemLocalSlot, c: ClusterColors, r: ClusterReadings) {
+        if (!ClusterSlotContent.visible(slot, r.values)) return
+        val types = (slot.style["progressBar"] as? Map<*, *>)?.get("type") as? Map<*, *> ?: return
+        val kind = if (types.containsKey("tickmarks")) "tickmarks" else if (types.containsKey("tickLabels")) "tickLabels" else return
+        val body = types[kind] as? Map<*, *> ?: return
+        val config = body["configuration"] as? Map<*, *> ?: return
+        val shape = ((config["style"] as? Map<*, *>)?.get("circular") as? Map<*, *>)?.get("configuration") as? Map<*, *> ?: return
+        val from = (shape["minimumAngle"] as? Number)?.toDouble() ?: return
+        val to = (shape["maximumAngle"] as? Number)?.toDouble() ?: return
+        val (start, sweep) = ClusterSlotGauge.angles(from, to, shape["clockwise"] == true)
+        val source = body["dataSource"] as? Map<*, *> ?: return
+        val rpm = source.containsKey("tachometer")
+        val (max, labelCount) = ClusterDialGeometry.scale(if (rpm) r.rpmMax else r.speedMax, rpm)
+        if (labelCount < 2) return
+        val major = max / (labelCount - 1)
+        val labels = config["tickLabelsConfiguration"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        val f = slot.frame; val cx = f.x + f.width / 2; val cy = f.y + f.height / 2
+        val radius = min(f.width, f.height) / 2
+        fun n(map: Map<*, *>, key: String, default: Float) = (map[key] as? Number)?.toFloat() ?: default
+        if (kind == "tickLabels") {
+            val inset = n(labels, "inset", 60f)
+            val size = n(labels["labelsFont"] as? Map<*, *> ?: emptyMap<Any, Any>(), "pointSize", 30f)
+            val divisor = n(labels, "labelDivider", if (rpm) 1000f else 1f)
+            val count = labelCount - 1
+            for (i in 0..count) {
+                if (i == 0 && labels["hideFirstLabel"] == true) continue
+                val v = i * major; val a = Math.toRadians((start + sweep * (v / max)).toDouble())
+                val shown = v / divisor
+                val value = if (shown % 1.0 == 0.0) shown.toInt().toString() else "%.1f".format(Locale.ROOT, shown)
+                val x = cx + (radius - inset) * cos(a).toFloat()
+                val y = cy + (radius - inset) * sin(a).toFloat()
+                val color = if (rpm && v >= r.redlineRpm) c.redline else c.ticks
+                val font = fonts?.get((labels["labelsFont"] as? Map<*, *>)?.get("name") as? String ?: "")
+                if (font != null) font.draw(canvas, value, x - font.width(value) / 2, y - font.height / 2, color)
+                else text(canvas, value, x, y + size * 0.35f, size, color, light)
+            }
+        } else {
+            val configs = config["tickTypeConfigurations"] as? Map<*, *> ?: return
+            val primary = ((configs["primary"] as? Map<*, *>)?.get("ticksCount") as? Number)?.toInt() ?: 0
+            val secondary = ((configs["secondary"] as? Map<*, *>)?.get("ticksCount") as? Number)?.toInt() ?: 0
+            if (primary <= 0) return
+            configs.forEach { (kind, raw) ->
+                val tick = raw as? Map<*, *> ?: return@forEach
+                val subdivisions = primary * when (kind) {
+                    "primary" -> 1
+                    "secondary" -> 1 + secondary
+                    else -> (1 + secondary) * (1 + n(tick, "ticksCount", 0f).toInt())
+                }
+                val step = major / subdivisions
+                val count = ((labelCount - 1) * subdivisions).coerceAtMost(2000)
+                paint.reset(); paint.isAntiAlias = true; paint.strokeWidth = n(tick, "tickWidth", 2f)
+                paint.strokeCap = assetCap(tick["lineCap"])
+                val outer = radius - n(tick, "tickInset", 20f); val inner = outer - n(tick, "tickLength", 10f)
+                for (i in 0..count) {
+                    if (i == 0 && tick["hideFirstTick"] == true) continue
+                    if (kind == "secondary" && i % (1 + secondary) == 0) continue
+                    if (kind == "tertiary" && i % (1 + n(tick, "ticksCount", 0f).toInt()) == 0) continue
+                    val v = i * step; val a = Math.toRadians((start + sweep * (v / max)).toDouble())
+                    paint.color = if (rpm && v >= r.redlineRpm) c.redline else c.ticks
+                    canvas.drawLine(cx + inner * cos(a).toFloat(), cy + inner * sin(a).toFloat(),
+                        cx + outer * cos(a).toFloat(), cy + outer * sin(a).toFloat(), paint)
+                }
+            }
+        }
     }
 
     // ---- radial styles (Cobranded / DigiRing / DigiBand / DigiBandWithTicks) ----

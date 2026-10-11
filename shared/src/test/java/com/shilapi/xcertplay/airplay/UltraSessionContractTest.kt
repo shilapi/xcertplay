@@ -46,6 +46,21 @@ class UltraSessionContractTest {
         assertEquals(1, calls)
         assertEquals(2, output.count { it.type == CarPlayUiSyncMessageType.COMMAND_ACK })
     }
+    @Test fun unknownOemCommandTypeIsAcknowledgedWithoutDroppingTheSession() {
+        // ultra52: the phone sent type 21 after layoutChange; the asset logs "Unhandled command" and continues.
+        val output = mutableListOf<CarPlayUiSyncMessage>()
+        val seen = mutableListOf<CarPlayUiSyncCommand>()
+        val session = CarPlayUiSyncSession("vehicle", output::add, onCommand = { seen += it.command })
+        session.start()
+        session.receive(CarPlayUiSyncMessageFactory.resetComplete(1, 1, 1, noAck = true))
+        session.receive(CarPlayUiSyncMessage(CarPlayUiSyncMessageType.COMMAND, 1, 2, 2,
+            payload = mapOf("type" to 21L, "data" to mapOf("targetAppearance" to 1L))))
+        session.receive(CarPlayUiSyncMessageFactory.command(1, 3, 3,
+            CarPlayUiSyncCommand.TARGET_APPEARANCE_CHANGE, mapOf("appearanceMode" to "dark")))
+        assertEquals(CarPlayUiSyncSessionState.READY, session.state)
+        assertEquals(listOf(CarPlayUiSyncCommand.TARGET_APPEARANCE_CHANGE), seen)
+        assertEquals(2, output.count { it.type == CarPlayUiSyncMessageType.COMMAND_ACK })
+    }
     @Test fun opackAndExplicitBinaryPlistAreBothDecodedWithoutChangingEncoding() {
         val request = CarAccessoryMessages.configRequest(7, 8)
         val binary = CafRcsCodec.encode(request.envelope, CafPayloadEncoding.BINARY_PLIST)
@@ -56,8 +71,12 @@ class UltraSessionContractTest {
         val provisioning = CarPlayUltraVehicleProvisioning.create()
         val handler = provisioning.pluginRegistrations.single().handler as CafVehicleStatePlugin
         val tree = CafConfigTree.decode(handler.config)
-        assertEquals(0x01000001L, tree.accessories.single().type.value)
-        assertTrue(tree.accessories.single().services.flatMap { it.characteristics }.any { it.writable == true })
+        val climate = tree.accessories.first()
+        assertEquals(0x01000001L, climate.type.value)
+        assertTrue(climate.services.flatMap { it.characteristics }.any { it.writable == true })
+        // Read-only telemetry for the local cluster follows the climate accessory.
+        assertEquals(setOf(0x09000001L, 0x09000003L, 0x09000005L, 0x09000006L),
+            tree.accessories.drop(1).map { it.type.value }.toSet())
     }
     @Test fun wirelessIdentificationCarriesConsistentMacAndPowerCoupling() {
         val config = com.shilapi.xcertplay.transport.Iap2IdentificationConfig(

@@ -352,7 +352,9 @@ object CafFirmwareConfigTreeDecoder : CafConfigTreeDecoder {
             format = format,
             writable = map.optionalBoolean("writable"),
             mutable = map.optionalBoolean("mutable"),
-            initialValue = map.optionalFormatValue("initialValue", format, label),
+            initialValue = if (map.containsKey("initialValue") && map["initialValue"] == null &&
+                map.optionalBoolean("supportsInvalid") == true) null
+                else map.optionalFormatValue("initialValue", format, label),
             priority = map.optionalLong("priority", label),
             largePayload = map.optionalBoolean("largePayload"),
             supportsInvalid = map.optionalBoolean("supportsInvalid"),

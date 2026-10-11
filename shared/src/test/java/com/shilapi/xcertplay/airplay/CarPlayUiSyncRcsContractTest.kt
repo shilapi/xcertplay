@@ -58,6 +58,7 @@ class CarPlayUiSyncRcsContractTest {
      */
     @Test fun transportSyncProbeAddsOneSynchronousFrameAndReportsThePeerReply() {
         val traces = java.util.Collections.synchronizedList(mutableListOf<String>())
+        fun hasTrace(predicate: (String) -> Boolean) = synchronized(traces) { traces.any(predicate) }
         val stream = RcsDataStream.open(RcsClientTypes.CAR_PLAY_CLUSTER_CONTROL,
             ByteArray(32) { 3 }, ByteArray(32) { 4 }, onTrace = traces::add)
         try {
@@ -71,13 +72,13 @@ class CarPlayUiSyncRcsContractTest {
                 val probe = phone.receiveNext(5_000)!!
                 assertEquals("Only the package type changes", reset.body.toList(), probe.body.toList())
                 assertEquals(ApTransportPackageCodec.PACKAGE_TYPE_SYNC, probe.packageType)
-                assertTrue(traces.any { it.contains("RCS transport sync probe sent") })
+                assertTrue(hasTrace { it.contains("RCS transport sync probe sent") })
                 phone.send(probe.transportReply())
                 val deadline = System.nanoTime() + 5_000_000_000L
                 while (System.nanoTime() < deadline &&
-                    traces.none { it.contains("RCS transport reply received") }) Thread.sleep(20)
+                    !hasTrace { it.contains("RCS transport reply received") }) Thread.sleep(20)
                 assertTrue("A peer reply must be reported with the client type",
-                    traces.any { it.contains("RCS transport reply received") && it.contains("token=0x0") })
+                    hasTrace { it.contains("RCS transport reply received") && it.contains("token=0x0") })
             }
         } finally { stream.close() }
     }
