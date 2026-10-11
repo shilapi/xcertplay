@@ -1173,25 +1173,10 @@ class CarPlayController(
                 ) {
                     return@postDelayed
                 }
-                debugLog("wireless handoff timed out waiting for tunnel iAP2 readiness")
-                Thread(
-                    {
-                        if (
-                            closed ||
-                            phase != Phase.WIRELESS ||
-                            generation != wirelessGeneration.get() ||
-                            wirelessActiveReported.get()
-                        ) {
-                            return@Thread
-                        }
-                        closeWirelessStack()
-                        fail(IOException("Wireless CarPlay handoff timed out waiting for tunnel iAP2"))
-                    },
-                    "xcertplay-wireless-handoff-timeout",
-                ).apply {
-                    isDaemon = true
-                    start()
-                }
+                debugLog(
+                    "wireless handoff timed out waiting for tunnel iAP2 readiness; " +
+                        "continuing with Bluetooth iAP2",
+                )
             },
             WIRELESS_HANDOFF_TIMEOUT_MILLIS,
         )

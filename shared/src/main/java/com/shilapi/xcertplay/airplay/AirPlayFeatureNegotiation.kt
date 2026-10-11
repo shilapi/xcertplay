@@ -147,6 +147,10 @@ object AirPlayFeatureNegotiation {
             supportedFeatures += AirPlayFeature.IAP_CHANNEL
         }
 
+        if (config.ultra == null && config.cluster != null && eventPortAvailable) {
+            supportedFeatures += AirPlayFeature.ALT_SCREEN
+            supportedFeatures += AirPlayFeature.UI_CONTEXT
+        }
         val ultra = config.ultra
         val ultraDisplay = ultra?.cluster
         ultra?.readyFeatures?.forEach { feature ->
@@ -250,7 +254,7 @@ object AirPlayFeatureNegotiation {
         val ultra = config.ultra
         when (feature) {
             AirPlayFeature.ALT_SCREEN -> {
-                val cluster = ultra?.cluster
+                val cluster = ultra?.cluster ?: config.cluster
                 if (cluster == null ||
                     cluster.widthPixels <= 0 ||
                     cluster.heightPixels <= 0
@@ -288,6 +292,8 @@ object AirPlayFeatureNegotiation {
             }
             return
         }
+
+        if (feature == AirPlayFeature.UI_CONTEXT && ultra == null && config.cluster != null) return
 
         if (feature !in BUILT_IN_FEATURES && ultra?.runtime?.supportsFeature(feature) != true) {
             throw AirPlayConfigurationException(

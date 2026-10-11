@@ -1,17 +1,19 @@
 package com.shilapi.xcertplay
 
+import com.shilapi.xcertplay.airplay.VideoCodec
 import java.nio.file.Files
 import org.junit.Assert.*
 import org.junit.Test
 
 class SessionLogFileTest {
-    @Test fun restartingWhilePreviousWriterIsAliveDoesNotRestoreOldFileOffset() {
+    @Test fun restartingAfterPreviousWriterClosesDoesNotRestoreOldFileOffset() {
         val file = Files.createTempFile("xcert-log", ".log").toFile()
         try {
             SessionLog().use { log ->
                 val previousActivityCallback = { log.append("late-background-record") }
                 log.start(file, "old-session-" + "x".repeat(4096))
                 repeat(64) { log.append("old-record-$it") }
+                log.close()
                 log.start(file, "new-session")
                 previousActivityCallback()
             }
@@ -143,6 +145,59 @@ class SessionLogFileTest {
             val suffix = retained.substringAfter("\n", "").substringAfter("\n", "").removeSuffix("\n")
             assertTrue(suffix.isNotEmpty())
             assertTrue(record.endsWith(suffix))
+        } finally { file.delete() }
+    }
+    @Test fun rawVideoIsOptInAndCopiesExactWireAndPlainBytes() {
+        val file = Files.createTempFile("xcert-log", ".txt").toFile()
+        try {
+            SessionLog().use { log ->
+                log.start(file, "header")
+                val header = byteArrayOf(0, 1, 2, 3, 0)
+                val wire = byteArrayOf(0x10, 0x20, 0xff.toByte())
+                val plain = byteArrayOf(0, 0, 1, 0x65)
+                log.appendVideoPacket(110, VideoCodec.H264, 1, header, wire, plain)
+                log.videoFramesEnabled = true
+                log.appendVideoPacket(111, VideoCodec.H265, 2, header, wire, plain)
+                wire.fill(0)
+                plain.fill(0)
+                log.videoFramesEnabled = false
+                log.appendVideoPacket(110, VideoCodec.H264, 3, header, wire, plain)
+            }
+            val retained = file.readText()
+            assertFalse(retained.contains("type=110"))
+            assertTrue(retained.contains("type=111 codec=H265 sequence=2"))
+            assertTrue(retained.contains("headerHex=0001020300"))
+            assertTrue(retained.contains("wireHex=1020ff"))
+            assertTrue(retained.contains("plainHex=00000165"))
+        } finally { file.delete() }
+    }
+
+    @Test fun oversizedRawPacketIsDroppedWithMarkerAndProgressSurvives() {
+        val file = Files.createTempFile("xcert-log", ".txt").toFile()
+        try {
+            SessionLogFile(file, maxBytes = 2048, headLimitBytes = 512).use { log ->
+                log.reset("handshake-header")
+                log.appendVideoPacket(110, "H264", 1, ByteArray(128), ByteArray(2048), null)
+                log.append("connection-ready")
+            }
+            val retained = file.readText()
+            assertTrue(retained.startsWith("handshake-header\n"))
+            assertTrue(retained.contains("LOG VIDEO LOSS droppedPackets=1"))
+            assertFalse(retained.contains("wireHex="))
+            assertTrue(retained.endsWith("connection-ready\n"))
+        } finally { file.delete() }
+    }
+
+    @Test fun activityReattachmentKeepsOneCaptureAndDoesNotTruncate() {
+        val file = Files.createTempFile("xcert-log", ".txt").toFile()
+        try {
+            SessionLog().use { log ->
+                log.start(file, "first-activity")
+                log.append("connected")
+                log.start(file, "second-activity")
+                log.append("reattached")
+            }
+            assertEquals("first-activity\nconnected\nreattached\n", file.readText())
         } finally { file.delete() }
     }
 }

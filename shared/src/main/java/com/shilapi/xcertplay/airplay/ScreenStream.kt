@@ -26,6 +26,8 @@ class ScreenStream(private val key: ByteArray, private val onTrace: (String) -> 
         fun onConfig(codecData: ByteArray) {}
         fun onFrame(naluBytes: ByteArray) {}
         fun onFrame(naluBytes: ByteArray, presentationTimeUs: Long?) = onFrame(naluBytes)
+        /** Original header and wire body, plus decrypted length-prefixed data before conversion. */
+        fun onPacket(sequence: Long, header: ByteArray, wire: ByteArray, plain: ByteArray?) {}
         fun onClosed(cause: Throwable?) {}
     }
 
@@ -91,6 +93,7 @@ class ScreenStream(private val key: ByteArray, private val onTrace: (String) -> 
     private fun onMessage(header: ByteArray, body: ByteArray) {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
+                val sequence = frameCounter.get()
                 val payload = if (body.size >= ScreenCodec.TAG_SIZE) {
                     ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
                         .also { frameCounter.incrementAndGet() }
@@ -107,6 +110,7 @@ class ScreenStream(private val key: ByteArray, private val onTrace: (String) -> 
                 onTrace("VIDEO decrypted counter=${frameCounter.get()} payloadHex=${ProtocolTraceFormatter.hex(payload)}")
                 val annexB = ScreenCodec.lengthPrefixedToAnnexB(payload, nalLengthSize)
                 onTrace("VIDEO decoder input nalLengthSize=$nalLengthSize annexBHex=${ProtocolTraceFormatter.hex(annexB)}")
+                listener.onPacket(sequence, header, body, payload)
                 listener.onFrame(annexB, ScreenPresentationTime.microseconds(header))
             }
             OP_VIDEO_CONFIG -> {
@@ -118,6 +122,7 @@ class ScreenStream(private val key: ByteArray, private val onTrace: (String) -> 
                 require(nalLengthSize != 3) { "Reserved NAL length size" }
                 onTrace("VIDEO config codec=$codec nalLengthSize=$nalLengthSize codecDataHex=${ProtocolTraceFormatter.hex(codecData)}")
                 listener.onCodec(codec)
+                listener.onPacket(frameCounter.get(), header, body, null)
                 listener.onConfig(codecData)
             }
         }

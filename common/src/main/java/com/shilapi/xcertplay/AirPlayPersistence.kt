@@ -9,6 +9,7 @@ import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.airplay.SafeAreaCodec
 import com.shilapi.xcertplay.airplay.SafeAreaRect
+import com.shilapi.xcertplay.media.MainMediaAudioBuffer
 import com.shilapi.xcertplay.media.MicrophoneGain
 import com.shilapi.xcertplay.orchestration.ManualHotspotBand
 import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
@@ -38,6 +39,7 @@ object AirPlayPersistence {
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
     private const val KEY_CARPLAY_ULTRA_ENABLED = "carplay_ultra_enabled"
     private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
+    private const val KEY_MAIN_MEDIA_AUDIO_BUFFER_DURATION_MS = "main_media_audio_buffer_duration_ms"
     private const val KEY_MICROPHONE_GAIN_PERCENT = "microphone_gain_percent"
     private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
@@ -46,7 +48,10 @@ object AirPlayPersistence {
     private const val KEY_MANUAL_HOTSPOT_BAND = "manual_hotspot_band"
     private const val KEY_MANUAL_HOTSPOT_CHANNEL = "manual_hotspot_channel"
     private const val KEY_MANUAL_HOTSPOT_SECURITY = "manual_hotspot_security"
+    private const val KEY_VIDEO_FRAME_LOGS_ENABLED = "video_frame_logs_enabled"
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
+    private const val KEY_MEDIA_METRICS_ENABLED = "media_metrics_enabled"
+    private const val KEY_AUDIO_PACKET_CAPTURE_ENABLED = "audio_packet_capture_enabled"
     private const val KEY_MORE_GESTURES_TO_SETTINGS = "more_gestures_to_settings"
     private const val KEY_MANUFACTURER = "manufacturer"
     private const val KEY_MODEL = "model"
@@ -75,6 +80,37 @@ object AirPlayPersistence {
     const val DEFAULT_MODEL = "xcertplay"
     const val DEFAULT_OEM_LABEL = ""
     const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-1"
+
+    fun loadWebDisplay(context: Context, type: Int): CarPlayWebDisplayConfig {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val prefix = "web_display_${type}_"
+        val fallback = CarPlayWebDisplayConfig(width = if (type == 111) 1920 else 1280)
+        return runCatching {
+            fallback.copy(
+                enabled = prefs.getBoolean(prefix + "enabled", false),
+                width = prefs.getInt(prefix + "width", fallback.width),
+                height = prefs.getInt(prefix + "height", fallback.height),
+                preview = prefs.getBoolean(prefix + "preview", true),
+            )
+        }.getOrDefault(fallback)
+    }
+
+    fun saveWebDisplay(context: Context, type: Int, config: CarPlayWebDisplayConfig) {
+        val prefix = "web_display_${type}_"
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(prefix + "enabled", config.enabled)
+            .putInt(prefix + "width", config.width).putInt(prefix + "height", config.height)
+            .putBoolean(prefix + "preview", config.preview).apply()
+    }
+
+    @Synchronized fun webDisplayKey(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getString("web_display_key", null) ?: ByteArray(24).also {
+            java.security.SecureRandom().nextBytes(it)
+        }.joinToString("") { "%02x".format(it.toInt() and 255) }.also {
+            prefs.edit().putString("web_display_key", it).apply()
+        }
+    }
 
     fun loadDisplayScaleTenths(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -126,6 +162,23 @@ object AirPlayPersistence {
     fun saveAdvancedAudioChannelMapping(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_ADVANCED_AUDIO_CHANNEL_MAPPING, enabled)
+            .apply()
+    }
+
+    fun loadMainMediaAudioBufferDurationMs(context: Context): Int =
+        MainMediaAudioBuffer.sanitizeDurationMs(
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(
+                KEY_MAIN_MEDIA_AUDIO_BUFFER_DURATION_MS,
+                MainMediaAudioBuffer.DEFAULT_DURATION_MS,
+            ),
+        )
+
+    fun saveMainMediaAudioBufferDurationMs(context: Context, durationMs: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(
+                KEY_MAIN_MEDIA_AUDIO_BUFFER_DURATION_MS,
+                MainMediaAudioBuffer.sanitizeDurationMs(durationMs),
+            )
             .apply()
     }
 
@@ -309,6 +362,36 @@ object AirPlayPersistence {
     fun saveDebugLogsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_DEBUG_LOGS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadVideoFrameLogsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_VIDEO_FRAME_LOGS_ENABLED, false)
+
+    fun saveVideoFrameLogsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_VIDEO_FRAME_LOGS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadMediaMetricsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MEDIA_METRICS_ENABLED, false)
+
+    fun saveMediaMetricsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_MEDIA_METRICS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadAudioPacketCaptureEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUDIO_PACKET_CAPTURE_ENABLED, false)
+
+    fun saveAudioPacketCaptureEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AUDIO_PACKET_CAPTURE_ENABLED, enabled)
             .apply()
     }
 

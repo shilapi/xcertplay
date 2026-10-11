@@ -259,7 +259,7 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
-    fun ultraDisabledDoesNotAdvertiseSecondDisplayOrUltraSidecars() {
+    fun classicClusterAdvertisesSecondDisplayWithoutUltraSidecars() {
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(
                 deviceName = "test",
@@ -271,7 +271,7 @@ class AirPlayInfoPlistTest {
             ),
         )
 
-        assertEquals(1, (info["displays"] as List<*>).size)
+        assertEquals(2, (info["displays"] as List<*>).size)
         assertFalse(info.containsKey("vehicleStateProtocolInfo"))
         assertFalse(info.containsKey("uiSyncInfo"))
     }

@@ -13,6 +13,7 @@
 - 支持触发 CarPlay Ultra （未测试/未完成的协议栈，但是确实可以在 iPhone 上触发 CarPlay Ultra 的提示）。
 - 支持语音、导航、音乐多通道音频输出并 mapping 至 Android 的对应通道。
 - 支持动态 Activity resize ，并自动重新握手至新的分辨率。
+- 支持主屏和仪表的独立网页输出（浏览器直接解码 H.264/H.265，主屏支持触控和音频）。
 - 支持车机位置回传。
 - 支持 Android 9 (API 28) 。
 
@@ -25,6 +26,16 @@
 4. 滑动到底部，选择 `Save & Reconnect`。
 5. 按照你选择的方式连接 MFi 芯片。
 6. 等待连接完成，然后开始使用。
+
+## 网页显示
+
+1. 在设置的 `Web displays` 中开启 `Main display` 和/或 `Instrument display`，填写分辨率，点击 `Save & Reconnect`。
+2. 浏览器设备与 Android 接入同一局域网，打开设置里显示的地址（`https://<IP>:8080/main` 或 `/cluster`，带访问 key，可复制）。
+3. 证书为自签名，每个浏览器首次打开会提示不安全，选择继续访问即可。
+4. 主屏网页：支持双指以内触控；打开后手机音频转到网页播放，点一下屏幕即可出声（浏览器限制）。麦克风仍使用 Android。
+5. 仪表网页仅显示，需要 iPhone 提供第二屏视频流。
+
+建议使用较新的 Chrome / Edge / Safari；浏览器不支持 H.265 时，在设置中关闭 `HEVC (H.265)`。
 
 ## 当前进度
 
@@ -82,13 +93,13 @@ Remote MFi 客户端把远程服务当作一块 MFi 芯片远程调用，抑或�
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew.bat :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+.\gradlew.bat :shared:testDebugUnitTest :common:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 在 macOS 或 Linux 中：
 
 ```bash
-./gradlew :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 构建未签名 release APK：

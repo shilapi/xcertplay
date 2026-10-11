@@ -15,7 +15,7 @@ import org.junit.Test
 class HandshakeTimelineTest {
     @Test
     fun wirelessSessionCompletesEveryPhase() {
-        val timeline = replay("handshake-wireless.log")
+        val timeline = replay("handshake-wireless.txt")
 
         assertNull(timeline.failure)
         timeline.phases.forEach { assertEquals(it.label, State.DONE, it.state) }
@@ -30,7 +30,7 @@ class HandshakeTimelineTest {
 
     @Test
     fun iap2ExchangeIsGroupedWithDirectionAndMeaning() {
-        val timeline = replay("handshake-wireless.log")
+        val timeline = replay("handshake-wireless.txt")
         val auth = timeline.groups.first { it.title == HandshakeTimeline.G_AUTH && it.phase.kind == PhaseKind.IAP2 }
 
         assertEquals(listOf("0xaa00", "0xaa01", "0xaa02", "0xaa03", "0xaa05"), auth.rows.map { it.code })
@@ -46,7 +46,7 @@ class HandshakeTimelineTest {
 
     @Test
     fun liveUpdatesCollapseIntoOneRow() {
-        val timeline = replay("handshake-wireless.log")
+        val timeline = replay("handshake-wireless.txt")
         val updates = timeline.groups.filter { it.title == HandshakeTimeline.G_UPDATES }
 
         assertEquals(2, updates.size)
@@ -57,7 +57,7 @@ class HandshakeTimelineTest {
 
     @Test
     fun rtspRequestsCarryRepliesAndLatency() {
-        val timeline = replay("handshake-wireless.log")
+        val timeline = replay("handshake-wireless.txt")
         val pairSetup = timeline.groups.first { it.title == HandshakeTimeline.G_PAIR_SETUP }
 
         assertEquals(3, pairSetup.rows.size)
@@ -84,7 +84,7 @@ class HandshakeTimelineTest {
 
     @Test
     fun negotiationChipsShowEnabledAndMissingFeatures() {
-        val timeline = replay("handshake-wireless.log")
+        val timeline = replay("handshake-wireless.txt")
         val chips = timeline.groups.flatMap { it.rows }.first { it.name.startsWith("Features:") }.chips
 
         assertTrue(chips.contains(HandshakeTimeline.Chip("hevc", ChipState.OK)))
@@ -102,7 +102,7 @@ class HandshakeTimelineTest {
     @Test
     fun waitingForIphoneIsReportedWhileInProgress() {
         val timeline = HandshakeTimeline(wireless = true, startedAtMillis = 0)
-        lines("handshake-wireless.log").takeWhile { !it.second.startsWith("wireless RFCOMM connected") }
+        lines("handshake-wireless.txt").takeWhile { !it.second.startsWith("wireless RFCOMM connected") }
             .forEach { timeline.accept(it.second, it.first) }
 
         val (group, awaiting) = timeline.currentAwaiting()!!
@@ -116,7 +116,7 @@ class HandshakeTimelineTest {
     @Test
     fun authenticationFailureStopsTheAttempt() {
         val timeline = HandshakeTimeline(wireless = true, startedAtMillis = 0)
-        lines("handshake-wireless.log").takeWhile { !it.second.startsWith("IAP2 RX [wireless-rfcomm] 0xaa05") }
+        lines("handshake-wireless.txt").takeWhile { !it.second.startsWith("IAP2 RX [wireless-rfcomm] 0xaa05") }
             .forEach { timeline.accept(it.second, it.first) }
         timeline.accept("IAP2 RX [wireless-rfcomm] 0xaa04 AuthenticationFailed frame=6B body=0 params", 5_000)
 
@@ -164,6 +164,92 @@ class HandshakeTimelineTest {
         assertFalse(HandshakeTimeline.isRelevant("audio underrun"))
         assertTrue(HandshakeTimeline.isRelevant("STEP mfi/start: preparing"))
         assertTrue(HandshakeTimeline.isRelevant("iap2 rx=0x4300 availability=x"))
+    }
+
+    @Test
+    fun unknownMasterEndpointStillAppearsInTheExchange() {
+        val timeline = HandshakeTimeline(wireless = false, startedAtMillis = 0)
+        timeline.accept("IAP2 RX [wired] 0x1234 frame=12B body=0 params", 100)
+
+        assertEquals("0x1234", timeline.latestRow?.code)
+        assertEquals(Direction.PHONE_TO_ACCESSORY, timeline.latestRow?.direction)
+        assertEquals(12, timeline.latestRow?.bytes)
+    }
+
+    @Test
+    fun ordinaryWirelessCarPlayDoesNotWaitForAnUltraTunnel() {
+        val timeline = HandshakeTimeline(wireless = true, startedAtMillis = 1)
+        timeline.accept("STEP mfi/ready: ready", 2)
+        timeline.accept("airplay rx SETUP /stream cseq=9 body=120", 3)
+        timeline.accept("airplay SETUP keys=[streams]", 4)
+        timeline.accept("airplay SETUP stream type=110 payload={type=110}", 5)
+        timeline.accept("airplay SETUP stream type=100 payload={type=100, audioType=media}", 6)
+        timeline.accept("airplay SETUP response streams=[{type=110, dataPort=5100}, {type=100, dataPort=5101, controlPort=5102}]", 7)
+        timeline.accept("airplay tx status=200 cseq=9 body=200", 8)
+
+        val rows = timeline.groups.first { it.title == HandshakeTimeline.G_STREAMS }.rows
+        assertEquals(2, rows.size)
+        assertTrue(rows.all { it.reply?.status == "200" })
+        assertEquals("dataPort 5100", rows[0].reply?.meaning)
+        assertEquals("dataPort 5101 · controlPort 5102", rows[1].reply?.meaning)
+        assertEquals(State.DONE, timeline.phases.first { it.kind == PhaseKind.STREAMS }.state)
+        assertTrue(timeline.completedAtMillis > 0)
+        assertTrue(timeline.phases.none { it.kind == PhaseKind.HANDOFF })
+    }
+
+    @Test
+    fun emptySuccessfulSetupDoesNotClaimThatVideoStarted() {
+        val timeline = HandshakeTimeline(wireless = false, startedAtMillis = 1)
+        timeline.accept("airplay rx SETUP /stream cseq=1 body=100", 2)
+        timeline.accept("airplay SETUP keys=[streams]", 3)
+        timeline.accept("airplay SETUP stream type=110 payload={type=110}", 4)
+        timeline.accept("airplay SETUP response streams=[]", 5)
+        timeline.accept("airplay tx status=200 cseq=1 body=20", 6)
+
+        assertEquals(0, timeline.streamCount)
+        assertEquals(0L, timeline.completedAtMillis)
+        assertTrue(timeline.latestRow!!.failed)
+    }
+
+    @Test
+    fun concurrentStreamSetupsKeepTheirOwnRepliesAndPorts() {
+        val timeline = HandshakeTimeline(wireless = false, startedAtMillis = 1)
+        timeline.accept("airplay rx SETUP /stream cseq=1 body=100", 2)
+        timeline.accept("airplay SETUP keys=[streams]", 3)
+        timeline.accept("airplay SETUP stream type=110 payload={type=110}", 4)
+        timeline.accept("airplay SETUP response streams=[{type=110, dataPort=5100}]", 5)
+        timeline.accept("airplay rx SETUP /stream cseq=2 body=100", 6)
+        timeline.accept("airplay SETUP keys=[streams]", 7)
+        timeline.accept("airplay SETUP stream type=111 payload={type=111}", 8)
+        timeline.accept("airplay SETUP response streams=[{type=111, dataPort=5200}]", 9)
+        timeline.accept("airplay tx status=200 cseq=1 body=100", 10)
+        timeline.accept("airplay tx status=500 cseq=2 body=0", 11)
+
+        val rows = timeline.groups.first { it.title == HandshakeTimeline.G_STREAMS }.rows
+        assertEquals("dataPort 5100", rows[0].reply?.meaning)
+        assertEquals("500", rows[1].reply?.status)
+        assertTrue(rows[1].failed)
+        assertEquals(1, timeline.streamCount)
+    }
+
+    @Test
+    fun bluetoothClosureAloneDoesNotInventATunnelHandoff() {
+        val timeline = HandshakeTimeline(wireless = true, startedAtMillis = 1)
+        timeline.accept("IAP2 CLOSE [wireless-rfcomm] peer EOF", 2)
+        timeline.accept("wireless RFCOMM EOF: control ended", 3)
+        assertTrue(timeline.phases.none { it.kind == PhaseKind.HANDOFF })
+    }
+
+    @Test
+    fun streamSetupMayContainOtherTopLevelKeys() {
+        val timeline = HandshakeTimeline(wireless = false, startedAtMillis = 1)
+        timeline.accept("airplay rx SETUP /stream cseq=1 body=100", 2)
+        timeline.accept("airplay SETUP keys=[name, streams]", 3)
+        timeline.accept("airplay SETUP stream type=110 payload={type=110}", 4)
+        timeline.accept("airplay SETUP response streams=[{type=110, dataPort=5100}]", 5)
+        timeline.accept("airplay tx status=200 cseq=1 body=20", 6)
+        assertEquals("type 110 · main screen", timeline.latestRow?.name)
+        assertEquals("dataPort 5100", timeline.latestRow?.reply?.meaning)
     }
 
     private fun replay(resource: String): HandshakeTimeline {

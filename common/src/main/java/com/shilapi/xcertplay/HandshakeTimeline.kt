@@ -100,14 +100,20 @@ class HandshakeTimeline(
         val atMillis: Long,
     ) {
         var isStream = false
-        var streamType: Int? = null
-        var clientType: String? = null
+        val streams = mutableListOf<StreamProposal>()
+        var setupResponse: String? = null
         var commandType: String? = null
     }
 
-    val phases: List<Phase> = (if (wireless) WIRELESS_PHASES else WIRED_PHASES).map {
+    private class StreamProposal(val type: Int?, var clientType: String? = null)
+    private class PendingRow(
+        val group: Group, val row: Row, val streamType: Int?,
+        val responseKnown: Boolean, val streamResponse: String?, val replyMeaning: String?,
+    )
+
+    val phases: MutableList<Phase> = (if (wireless) WIRELESS_PHASES else WIRED_PHASES).map {
         Phase(it.kind, it.label, it.title, it.channel, it.concurrent)
-    }
+    }.toMutableList()
     val links: List<Link> = if (wireless) {
         listOf(Link(LinkKind.WIFI, "Wi-Fi"), Link(LinkKind.RFCOMM, "RFCOMM"), Link(LinkKind.AIRPLAY, "AirPlay"), Link(LinkKind.TUNNEL, "Tunnel"))
     } else {
@@ -131,11 +137,10 @@ class HandshakeTimeline(
         private set
 
     private var nextRowId = 0
-    private val rowsByCseq = mutableMapOf<Int, Pair<Group, Row>>()
+    private val rowsByCseq = mutableMapOf<Int, MutableList<PendingRow>>()
     private val ignoredCseq = mutableSetOf<Int>()
     private var pending: PendingRequest? = null
     private var controlEncrypted = false
-    private var lastSetupResponse: String? = null
     private val updateCounts = mutableMapOf<Group, LinkedHashMap<String, Int>>()
 
     /** Applies one progress record. Returns true when the panel needs to redraw. */
@@ -145,7 +150,7 @@ class HandshakeTimeline(
         handle(message.substringBefore('\n'), message, atMillis)
         if (revision != before) {
             refreshGroupStates()
-            if (completedAtMillis == 0L && failure == null && phases.all { it.state == State.DONE }) completedAtMillis = atMillis
+            if (completedAtMillis == 0L && failure == null && phases.all { it.state == State.DONE || it.state == State.SKIPPED }) completedAtMillis = atMillis
         }
         return revision != before
     }
@@ -185,16 +190,16 @@ class HandshakeTimeline(
             line.startsWith("airplay rx ") -> rtspRequest(line, at)
             line.startsWith("airplay tx status=") -> rtspReply(line, at)
             line.startsWith("airplay SETUP keys=") -> {
-                val streams = line.contains("keys=[streams]")
+                val streams = line.substringAfter("keys=").removePrefix("[").substringBefore(']')
+                    .split(',').any { it.trim() == "streams" }
                 pending?.isStream = streams
                 if (!streams) flushPending()
             }
-            line.startsWith("airplay SETUP stream type=") -> setupStream(line, at)
+            line.startsWith("airplay SETUP stream type=") -> setupStream(line)
             line.startsWith("AirPlay RCS SETUP clientType=") -> {
-                pending?.clientType = line.removePrefix("AirPlay RCS SETUP clientType=").substringBefore(' ')
-                flushPending()
+                pending?.streams?.lastOrNull()?.clientType = line.removePrefix("AirPlay RCS SETUP clientType=").substringBefore(' ')
             }
-            line.startsWith("airplay SETUP response ") -> lastSetupResponse = line
+            line.startsWith("airplay SETUP response ") -> pending?.setupResponse = line
             line.startsWith("airplay command type=") -> {
                 pending?.commandType = line.removePrefix("airplay command type=").substringBefore(' ')
                 flushPending()
@@ -339,10 +344,15 @@ class HandshakeTimeline(
             }
             line.startsWith("wireless handoff ready; closing Bluetooth") ->
                 localRow(PhaseKind.HANDOFF, G_HANDOFF, "Closing the Bluetooth bootstrap channel", at)
-            line.startsWith("wireless RFCOMM EOF") -> messageRow(
-                PhaseKind.HANDOFF, G_HANDOFF, Direction.PHONE_TO_ACCESSORY, Channel.BLUETOOTH,
-                "RFCOMM", "EOF", null, "iPhone closed the Bluetooth channel", null, at,
-            )
+            line.startsWith("wireless RFCOMM EOF") -> {
+                val handoff = phases.any { it.kind == PhaseKind.HANDOFF }
+                messageRow(
+                    if (handoff) PhaseKind.HANDOFF else PhaseKind.BLUETOOTH,
+                    if (handoff) G_HANDOFF else G_RFCOMM,
+                    Direction.PHONE_TO_ACCESSORY, Channel.BLUETOOTH,
+                    "RFCOMM", "EOF", null, "iPhone closed the Bluetooth channel", null, at,
+                )
+            }
             line.startsWith("airplay control encryption enabled") -> {
                 localRow(PhaseKind.PAIR, G_PAIR_VERIFY, "Control channel encrypted (ChaCha20-Poly1305)", at)
                 controlEncrypted = true
@@ -391,8 +401,8 @@ class HandshakeTimeline(
         val context = match.groupValues[2]
         val code = match.groupValues[3].lowercase()
         val id = code.removePrefix("0x").toInt(16)
-        val name = match.groupValues[4]
-        val bytes = match.groupValues[5].toInt()
+        val name = match.groupValues[4].ifBlank { code }
+        val bytes = match.groupValues[5].toIntOrNull() ?: return
         val phaseKind = iap2Phase(context)
         val tag = iap2Tag(context)
         val updateLabel = UPDATE_LABELS[id]
@@ -466,7 +476,12 @@ class HandshakeTimeline(
         val context = line.substringAfter('[').substringBefore(']')
         if (context == "wireless-rfcomm") {
             link(LinkKind.RFCOMM, LinkState.RELEASED)
-            localRow(PhaseKind.HANDOFF, G_HANDOFF, "iAP2 over Bluetooth closed", at)
+            val handoff = phases.any { it.kind == PhaseKind.HANDOFF }
+            localRow(
+                if (handoff) PhaseKind.HANDOFF else PhaseKind.BLUETOOTH,
+                if (handoff) G_HANDOFF else G_RFCOMM,
+                "iAP2 over Bluetooth closed", at,
+            )
         } else {
             latestGroup?.let { localRow(it.phase.kind, it.title, "iAP2 channel closed ($context)", at)?.warning = true }
         }
@@ -477,8 +492,8 @@ class HandshakeTimeline(
         flushPending()
         val method = match.groupValues[1]
         val path = match.groupValues[2]
-        val cseq = match.groupValues[3].toInt()
-        val bytes = match.groupValues[4].toInt()
+        val cseq = match.groupValues[3].toIntOrNull() ?: return
+        val bytes = match.groupValues[4].toIntOrNull() ?: return
         val airPlay = links.first { it.kind == LinkKind.AIRPLAY }
         if (airPlay.state == LinkState.OFF || airPlay.state == LinkState.LISTENING) link(LinkKind.AIRPLAY, LinkState.UP)
         when {
@@ -488,20 +503,28 @@ class HandshakeTimeline(
         }
     }
 
-    private fun setupStream(line: String, at: Long) {
+    private fun setupStream(line: String) {
         val request = pending ?: return
         request.isStream = true
-        request.streamType = line.removePrefix("airplay SETUP stream type=").substringBefore(' ').toIntOrNull()
-        if (request.streamType != DATA_STREAM) flushPending()
+        val type = line.removePrefix("airplay SETUP stream type=").substringBefore(' ').toIntOrNull()
+        val tunnel = line.contains(IAP_DATASTREAM_UUID, ignoreCase = true)
+        request.streams += StreamProposal(type, if (tunnel) "iAPChannel" else null)
     }
 
     private fun flushPending() {
         val request = pending ?: return
         pending = null
-        addRtspRow(request)
+        if (request.isStream && request.streams.isNotEmpty()) {
+            val responses = request.setupResponse?.let { STREAM_RESPONSE.findAll(it).map { it.value }.toMutableList() }
+            request.streams.forEach { stream ->
+                val index = responses?.indexOfFirst { STREAM_TYPE.find(it)?.groupValues?.get(1)?.toIntOrNull() == stream.type } ?: -1
+                val response = if (index >= 0) responses?.removeAt(index) else null
+                addRtspRow(request, stream, response)
+            }
+        } else addRtspRow(request)
     }
 
-    private fun addRtspRow(request: PendingRequest) {
+    private fun addRtspRow(request: PendingRequest, stream: StreamProposal? = null, streamResponse: String? = null) {
         val path = request.path
         val pairIndex = { title: String -> groups.lastOrNull { it.title == title }?.rows?.count { it.code != null } ?: 0 }
         val target: RtspTarget = when {
@@ -524,11 +547,10 @@ class HandshakeTimeline(
             request.method == "SETUP" && !request.isStream -> RtspTarget(PhaseKind.SESSION, G_SESSION_SETUP, "session",
                 "Device info, feature list and timing port", "Event and timing ports")
             request.method == "SETUP" -> {
-                val type = request.streamType
-                val client = request.clientType
+                val type = stream?.type
+                val client = stream?.clientType
                 val label = if (type == DATA_STREAM && client != null) client else STREAM_LABELS[type] ?: "stream"
                 val meaning = if (type == DATA_STREAM) RCS_MEANINGS[client] ?: "Data stream" else STREAM_MEANINGS[type] ?: "Media stream"
-                streamCount++
                 val tunnel = wireless && client == "iAPChannel"
                 RtspTarget(if (tunnel) PhaseKind.HANDOFF else PhaseKind.STREAMS, if (tunnel) G_TUNNEL_STREAM else G_STREAMS,
                     "type ${type ?: "?"} · $label", meaning, null)
@@ -547,38 +569,57 @@ class HandshakeTimeline(
         val tag = if (!wireless) "USB network" else if (controlEncrypted) "Encrypted" else "TCP 7000"
         val row = messageRow(
             target.phase, target.group, Direction.PHONE_TO_ACCESSORY, Channel.RTSP,
-            request.method, target.name, request.bytes, target.meaning, null, request.atMillis, tag = tag,
+            request.method, target.name, request.bytes, target.meaning,
+            if (request.streams.size > 1) "Shared SETUP cseq=${request.cseq}: ${request.streams.size} streams; byte counts describe the complete request and reply" else null,
+            request.atMillis, tag = tag,
         ) ?: return
         val group = latestGroup ?: return
         group.pendingReplies += request.cseq
-        rowsByCseq[request.cseq] = group to row
-        replyHints[row.id] = target.replyMeaning
+        rowsByCseq.getOrPut(request.cseq) { mutableListOf() } += PendingRow(
+            group, row, stream?.type, request.setupResponse != null, streamResponse, target.replyMeaning,
+        )
     }
-
-    private val replyHints = mutableMapOf<Int, String?>()
 
     private fun rtspReply(line: String, at: Long) {
         val match = RTSP_REPLY.find(line) ?: return
         val status = match.groupValues[1]
-        val cseq = match.groupValues[2].toInt()
-        val bytes = match.groupValues[3].toInt()
+        val cseq = match.groupValues[2].toIntOrNull() ?: return
+        val bytes = match.groupValues[3].toIntOrNull() ?: return
         if (ignoredCseq.remove(cseq)) return
         if (pending?.cseq == cseq) flushPending()
-        val (group, row) = rowsByCseq.remove(cseq) ?: return
-        val streamPorts = lastSetupResponse?.let { response ->
-            listOfNotNull(
-                DATA_PORT.find(response)?.let { "dataPort ${it.groupValues[1]}" },
-                STREAM_ID.find(response)?.let { "streamID ${it.groupValues[1]}" },
-            ).joinToString(" · ").ifEmpty { null }
+        val replies = rowsByCseq.remove(cseq) ?: return
+        replies.forEach { pendingRow ->
+            val group = pendingRow.group
+            val row = pendingRow.row
+            val accepted = status == "200" &&
+                (pendingRow.streamType == null || !pendingRow.responseKnown || pendingRow.streamResponse != null)
+            val ports = pendingRow.streamResponse?.let { response ->
+                listOfNotNull(
+                    DATA_PORT.find(response)?.let { "dataPort ${it.groupValues[1]}" },
+                    CONTROL_PORT.find(response)?.let { "controlPort ${it.groupValues[1]}" },
+                    STREAM_ID.find(response)?.let { "streamID ${it.groupValues[1]}" },
+                ).joinToString(" · ").ifEmpty { null }
+            }
+            val meaning = if (status == "200" && !accepted) "Stream not accepted" else ports ?: pendingRow.replyMeaning
+            row.reply = Reply(status, bytes, (at - row.atMillis).coerceAtLeast(0), meaning)
+            row.failed = !accepted
+            if (accepted && pendingRow.streamType != null) {
+                streamCount++
+                if (pendingRow.streamType == MAIN_SCREEN) {
+                    complete(PhaseKind.STREAMS)
+                    // A working main screen also proves earlier optional phases were passed.
+                    val index = phases.indexOfFirst { it.kind == PhaseKind.STREAMS }
+                    phases.take(index).forEach {
+                        if (it.state == State.IDLE) it.state = State.SKIPPED
+                        else if (it.state == State.ACTIVE) it.state = State.DONE
+                    }
+                }
+            }
+            row.revision++
+            group.pendingReplies -= cseq
+            group.lastActivityMillis = at
+            touch()
         }
-        lastSetupResponse = null
-        row.reply = Reply(status, bytes, at - row.atMillis, streamPorts ?: replyHints.remove(row.id))
-        if (status != "200") row.failed = true
-        if (status == "200" && row.name.startsWith("type $MAIN_SCREEN ")) complete(PhaseKind.STREAMS)
-        row.revision++
-        group.pendingReplies -= cseq
-        group.lastActivityMillis = at
-        touch()
     }
 
     private fun features(line: String, at: Long) {
@@ -713,7 +754,14 @@ class HandshakeTimeline(
         }
     }
 
-    private fun phase(kind: PhaseKind): Phase? = phases.firstOrNull { it.kind == kind }
+    private fun phase(kind: PhaseKind): Phase? {
+        phases.firstOrNull { it.kind == kind }?.let { return it }
+        if (!wireless || kind != PhaseKind.HANDOFF) return null
+        return Phase(PhaseKind.HANDOFF, "Handoff", "Tunnel handoff", Channel.IAP2, concurrent = true).also {
+            phases += it
+            completedAtMillis = 0L
+        }
+    }
 
     private fun iap2Phase(context: String): PhaseKind =
         if (context == "wireless-tunnel") PhaseKind.HANDOFF else PhaseKind.IAP2
@@ -797,6 +845,7 @@ class HandshakeTimeline(
         private const val IDENTIFICATION_ACCEPTED = 0x1d02
         private const val AUTHENTICATION_SUCCEEDED = 0xaa05
         private const val START_SESSION = 0x4301
+        private const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
         private const val DATA_STREAM = 130
         private const val MAIN_SCREEN = 110
 
@@ -809,7 +858,6 @@ class HandshakeTimeline(
             PhaseSpec(PhaseKind.PAIR, "Pair", "AirPlay pairing", Channel.RTSP),
             PhaseSpec(PhaseKind.SESSION, "Session", "AirPlay session", Channel.RTSP),
             PhaseSpec(PhaseKind.STREAMS, "Streams", "Media and data streams", Channel.STREAM, concurrent = true),
-            PhaseSpec(PhaseKind.HANDOFF, "Handoff", "Tunnel handoff", Channel.IAP2, concurrent = true),
         )
         private val WIRED_PHASES = listOf(
             PhaseSpec(PhaseKind.MFI, "MFi", "MFi provider", Channel.LOCAL),
@@ -896,11 +944,14 @@ class HandshakeTimeline(
         )
         private val AVAILABILITY_LABELS = mapOf("wired" to "Wired", "wireless" to "Wireless", "themeAssets" to "Theme assets")
 
-        private val IAP2_FRAME = Regex("""^IAP2 (TX|RX) \[([^\]]+)\] (0x[0-9a-fA-F]{4}) (\S+) frame=(\d+)B""")
+        private val IAP2_FRAME = Regex("""^IAP2 (TX|RX) \[([^\]]+)\] (0x[0-9a-fA-F]{4})(?: (\S+))? frame=(\d+)B""")
         private val RTSP_REQUEST = Regex("""^airplay rx (\S+) (\S+) cseq=(\d+) body=(\d+)""")
         private val RTSP_REPLY = Regex("""^airplay tx status=(\d+) cseq=(\d+) body=(\d+)""")
         private val FEATURES = Regex("""requested=\[(.*?)] supported=\[(.*?)] enabled=\[(.*?)]""")
         private val AVAILABILITY = Regex("""(\w+)=Iap2AvailabilityState\(available=(true|false)""")
+        private val STREAM_RESPONSE = Regex("""\{[^{}]*\}""")
+        private val STREAM_TYPE = Regex("""(?:^|[,{ ]+)type=(\d+)\b""")
+        private val CONTROL_PORT = Regex("""controlPort=(\d+)""")
         private val DATA_PORT = Regex("""dataPort=(\d+)""")
         private val STREAM_ID = Regex("""streamID=(\d+)""")
         private val MAC = Regex("""\b([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})\b""")

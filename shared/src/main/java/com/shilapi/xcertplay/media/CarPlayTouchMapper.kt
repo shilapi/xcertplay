@@ -15,11 +15,16 @@ object CarPlayTouchMapper {
         streamWidth: Int = viewWidth,
         streamHeight: Int = viewHeight,
     ): List<AirPlayContact> {
-        val rect = contentRect(viewWidth, viewHeight, streamWidth, streamHeight)
+        val width = viewWidth.coerceAtLeast(1)
+        val height = viewHeight.coerceAtLeast(1)
         val action = event.actionMasked
         val liftedIndex = if (action == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
         val allUp = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL
         val count = minOf(MAX_CONTACTS, event.pointerCount)
+        val rect = contentRect(width, height, streamWidth.coerceAtLeast(1), streamHeight.coerceAtLeast(1))
+        if (action == MotionEvent.ACTION_DOWN &&
+            (event.x < rect[0] || event.x > rect[0] + rect[2] || event.y < rect[1] || event.y > rect[1] + rect[3])
+        ) return emptyList()
         val contacts = ArrayList<AirPlayContact>(count)
         for (index in 0 until count) {
             contacts.add(

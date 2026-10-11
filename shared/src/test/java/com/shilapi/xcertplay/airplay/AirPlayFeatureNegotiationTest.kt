@@ -93,6 +93,21 @@ class AirPlayFeatureNegotiationTest {
     }
 
     @Test
+    fun classicClusterNegotiatesUiContextAndAltScreenTogetherWithoutUltraFeatures() {
+        val config = config(ultra = null).copy(cluster = AirPlayDisplayConfig(1920, 720))
+        val requested = listOf("altScreen", "uiContext", "uiSync", "vehicleStateProtocol")
+        val proposal = AirPlayFeatureNegotiation.propose(config, requested, eventPortAvailable = true)
+        assertEquals(listOf("altScreen", "uiContext"), proposal.enabledFeatures)
+        AirPlayFeatureNegotiation.validateEnabledFeatures(config, proposal.enabledFeatureSet)
+        assertTrue(AirPlayFeatureNegotiation.propose(config, requested, eventPortAvailable = false).enabledFeatures.isEmpty())
+        assertTrue(AirPlayFeatureNegotiation.propose(config, listOf("altScreen"), eventPortAvailable = true).enabledFeatures.isEmpty())
+
+        val control = AirPlayDisplayControlFactory.create(config, { true }, {})
+        assertEquals(proposal.enabledFeatures, control.negotiate(requested, true))
+        assertEquals(2, (control.info(emptyMap())["displays"] as List<*>).size)
+    }
+
+    @Test
     fun iapChannelRequiresAnAvailableEventPort() {
         val config = config()
         val requested = listOf("iAPChannel", "viewAreas")

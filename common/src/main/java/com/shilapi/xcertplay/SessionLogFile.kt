@@ -12,6 +12,10 @@ import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Ordered capture retaining the session head and a rolling tail in one size-limited file. */
 internal class SessionLogFile(
@@ -24,7 +28,7 @@ internal class SessionLogFile(
         require(maxBytes >= 2048)
         require(headLimitBytes in 1..(maxBytes - RETENTION_MARKER_RESERVE - TRUNCATION_MARKER_RESERVE - 128))
     }
-    private val lock = Any()
+    private val lock = ReentrantLock()
     private val writerExecutor = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(16),
         { task -> Thread(task, "xcertplay-log-writer").apply { isDaemon = true } },
@@ -44,10 +48,12 @@ internal class SessionLogFile(
     private var closed = false
     private val formatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private var failedRecords = 0L
+    private val videoPending = AtomicBoolean(false)
+    private val droppedVideoPackets = AtomicLong(0)
 
     /** Clears previous records and starts a new session. */
     fun reset(header: String) {
-        synchronized(lock) {
+        lock.withLock {
             check(!closed)
             writerExecutor.submit {
                 try {
@@ -71,10 +77,66 @@ internal class SessionLogFile(
     fun appendTimestamped(message: String, timestampMillis: Long) = enqueue {
         "${formatter.format(Date(timestampMillis))}  $message"
     }
+    /** Raw capture is best-effort: reserve queue space for connection records, never stall video. */
+    fun appendVideoPacket(
+        type: Int, codec: String, sequence: Long,
+        header: ByteArray, wire: ByteArray, plain: ByteArray?,
+    ) {
+        if (!lock.tryLock()) {
+            droppedVideoPackets.incrementAndGet()
+            return
+        }
+        try {
+            if (closed) return
+            val payload = plain?.takeUnless { it === wire }
+            val size = header.size.toLong() + wire.size + (payload?.size ?: 0)
+            val recordBudget = maxBytes - headLimitBytes - RETENTION_MARKER_RESERVE - TRUNCATION_MARKER_RESERVE - 1024
+            if (size > MAX_PENDING_VIDEO_BYTES || size * 2 > recordBudget ||
+                writerExecutor.queue.remainingCapacity() < 8 || !videoPending.compareAndSet(false, true)) {
+                droppedVideoPackets.incrementAndGet()
+                return
+            }
+            val capturedHeader = header.copyOf()
+            val capturedWire = wire.copyOf()
+            val capturedPlain = payload?.copyOf()
+            val at = System.currentTimeMillis()
+            writerExecutor.execute {
+                try {
+                    writeVideoLoss()
+                    writeLine(buildString {
+                        append(formatter.format(Date(at)))
+                        append("  TRACE MEDIA VIDEO type=$type codec=$codec sequence=$sequence")
+                        append(" opcode=${capturedHeader.getOrNull(4)?.toInt()?.and(0xff)}")
+                        append(" headerBytes=${capturedHeader.size} wireBytes=${capturedWire.size}")
+                        append(" plainBytes=${capturedPlain?.size ?: 0}\n  headerHex=")
+                        append(hex(capturedHeader))
+                        append("\n  wireHex="); append(hex(capturedWire))
+                        capturedPlain?.let { append("\n  plainHex="); append(hex(it)) }
+                    })
+                } finally { videoPending.set(false) }
+            }
+        } finally { lock.unlock() }
+    }
+
+    private fun writeVideoLoss() {
+        val dropped = droppedVideoPackets.getAndSet(0)
+        if (dropped > 0) writeLine("LOG VIDEO LOSS droppedPackets=$dropped reason=capture-capacity")
+    }
+
+    private fun hex(bytes: ByteArray): String {
+        val digits = "0123456789abcdef"
+        val output = CharArray(bytes.size * 2)
+        bytes.forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            output[index * 2] = digits[value ushr 4]
+            output[index * 2 + 1] = digits[value and 15]
+        }
+        return String(output)
+    }
     private fun enqueue(line: () -> String) {
-        synchronized(lock) {
+        lock.withLock {
             if (closed) { onError("Log append rejected after close path=${file.absolutePath}"); return }
-            writerExecutor.execute { writeLine(line()) }
+            writerExecutor.execute { writeVideoLoss(); writeLine(line()) }
         }
     }
     private fun writeLine(line: String) {
@@ -198,10 +260,11 @@ internal class SessionLogFile(
         onError("Log write failed path=${file.absolutePath} failedRecords=$failedRecords reason=${error.message}")
     }
     override fun close() {
-        synchronized(lock) {
+        lock.withLock {
             if (closed) return
             closed = true
             writerExecutor.execute {
+                writeVideoLoss()
                 runCatching { output?.close() }.onFailure { onError("Log close failed: ${it.message}") }
                 output = null
             }
@@ -212,6 +275,7 @@ internal class SessionLogFile(
 
     private companion object {
         const val MAX_BYTES = 30 * 1024 * 1024
+        const val MAX_PENDING_VIDEO_BYTES = 8 * 1024 * 1024L
         const val RETENTION_MARKER_RESERVE = 512
         const val TRUNCATION_MARKER_RESERVE = 128
     }

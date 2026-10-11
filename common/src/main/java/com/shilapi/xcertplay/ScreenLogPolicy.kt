@@ -4,8 +4,11 @@ package com.shilapi.xcertplay
 internal object ScreenLogPolicy {
     fun summary(message: String): String? {
         if (message.startsWith("TRACE ")) return null
-        if (!message.startsWith("IAP2 ")) return message
         val firstLine = message.lineSequence().firstOrNull().orEmpty()
-        return if (firstLine.length <= 480) firstLine else firstLine.take(480) + "..."
+        val line = when {
+            firstLine.startsWith("airplay SETUP stream type=") -> firstLine.substringBefore(" payload=")
+            else -> firstLine
+        }
+        return if (line.length <= 480) line else line.take(480) + "..."
     }
 }

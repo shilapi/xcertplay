@@ -43,6 +43,7 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
     /** Time source for the elapsed and waiting timers; the debug lab replaces it to pause time. */
     var clock: () -> Long = System::currentTimeMillis
     private var timeline: HandshakeTimeline? = null
+    private var status = "Preparing CarPlay"
     private var renderedRevision = -1
     private var renderScheduled = false
     private var followLatest = true
@@ -58,7 +59,6 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
     private val statusGlyph = StateGlyphView(context)
     private val phaseTitle = text(17f, LABEL, medium = true)
     private val subtitle = text(13f, SECONDARY)
-    private val elapsed = text(22f, LABEL, medium = true).apply { fontFeatureSettings = "tnum" }
     private val previousRow = LinearLayout(context)
     private val previousText = text(12f, RED)
     private val track = PhaseTrackView(context)
@@ -72,7 +72,6 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
     }
     private val tick = object : Runnable {
         override fun run() {
-            updateClock()
             track.invalidate()
             linkLine.invalidate()
             if (isAnimating()) postDelayed(this, TICK_MILLIS)
@@ -97,9 +96,7 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         titles.addView(subtitle, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(3) })
         header.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f).apply {
             marginStart = dp(12)
-            marginEnd = dp(12)
         })
-        header.addView(elapsed)
         progressCard.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
 
         previousRow.orientation = LinearLayout.HORIZONTAL
@@ -144,6 +141,12 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         renderNow()
     }
 
+    /** Host progress also covers permission prompts before the controller starts. */
+    fun setStatus(message: String) {
+        status = message
+        updateSubtitle()
+    }
+
     /** Schedules a redraw after the bound timeline changed. */
     fun notifyChanged() {
         if (renderScheduled) return
@@ -156,7 +159,7 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         val height = MeasureSpec.getSize(heightMeasureSpec)
         val gap = dp(GAP_DP)
         if (isWide(width, height)) {
-            val total = minOf(width, dp(MAX_WIDE_DP))
+            val total = minOf(width, MAX_WIDE_PX)
             val left = (total * 0.4f).toInt().coerceIn(dp(300), dp(420)).coerceAtMost(total / 2)
             progressCard.measure(exactly(left), exactly(height))
             logCard.measure(exactly(total - left - gap), exactly(height))
@@ -247,7 +250,7 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         linkLine.model = model
         linkLine.invalidate()
         renderGroups(model)
-        updateClock()
+        updateSubtitle()
         if (followLatest) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
     }
 
@@ -259,18 +262,15 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         return model.phases.lastOrNull { it.state == State.ACTIVE } ?: latest
     }
 
-    private fun updateClock() {
+    private fun updateSubtitle() {
         val model = timeline ?: return
-        val now = clock()
         val failure = model.failure
-        val end = failure?.atMillis ?: model.completedAtMillis.takeIf { it > 0 } ?: now
-        setIfChanged(elapsed, String.format(Locale.US, "%.1fs", (end - model.startedAtMillis).coerceAtLeast(0) / 1000.0))
         val waiting = model.currentAwaiting()?.second
         val line = when {
             failure != null -> failure.detail
             model.completedAtMillis > 0 -> null
-            waiting != null -> "${waiting.text} · ${seconds(now - waiting.sinceMillis)}"
-            else -> model.latestGroup?.title
+            waiting != null -> waiting.text
+            else -> status
         }
         setIfChanged(subtitle, line.orEmpty())
         subtitle.setTextColor(if (failure != null) RED_SOFT else SECONDARY)
@@ -733,26 +733,26 @@ class HandshakePanelView(context: Context) : ViewGroup(context) {
         private const val TRACK_GAP_DP = 6f
         private const val CORNER_DP = 22
         private const val MAX_TALL_DP = 720
-        private const val MAX_WIDE_DP = 1200
+        private const val MAX_WIDE_PX = 1200
         private const val WIDE_RATIO = 1.2f
 
-        private val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        internal val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
         // One muted violet accent, neutral grey surfaces, near-white text, a muted cyan only for
-        // in-progress cues and a muted rose for errors. No gradients.
-        private val ACCENT = Color.rgb(0x92, 0x75, 0xD7)
-        private val LABEL = Color.rgb(0xF7, 0xF8, 0xFF)
-        private val CUE = Color.rgb(0x81, 0xCE, 0xDF)
-        private val RED = Color.rgb(0xE4, 0x67, 0x7E)
-        private val RED_SOFT = Color.rgb(0xEC, 0x9C, 0xAB)
-        private val CARD = Color.rgb(0x55, 0x55, 0x55)
-        private val FILL = Color.rgb(0x6E, 0x6E, 0x6E)
-        private val FILL_DARK = Color.rgb(0x48, 0x48, 0x48)
-        private val SEPARATOR = withAlpha(LABEL, 34)
-        private val SECONDARY = withAlpha(LABEL, 178)
+        // in-progress cues and a muted rose for errors. No gradients. The settings menu shares it.
+        internal val ACCENT = Color.rgb(0x92, 0x75, 0xD7)
+        internal val LABEL = Color.rgb(0xF7, 0xF8, 0xFF)
+        private val CUE = Color.rgb(0x75, 0xAC, 0xB8)
+        internal val RED = Color.rgb(0xFF, 0x9E, 0xB0)
+        private val RED_SOFT = Color.rgb(0xCB, 0xAE, 0xB3)
+        internal val CARD = Color.rgb(0x0F, 0x0F, 0x0F)
+        internal val FILL = Color.rgb(0x40, 0x3A, 0x59)
+        internal val FILL_DARK = Color.rgb(0x33, 0x33, 0x33)
+        internal val SEPARATOR = withAlpha(LABEL, 34)
+        internal val SECONDARY = withAlpha(LABEL, 137)
         private val TERTIARY = withAlpha(LABEL, 120)
 
-        private fun withAlpha(color: Int, alpha: Int): Int =
+        internal fun withAlpha(color: Int, alpha: Int): Int =
             Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
 
         private fun channelColor(channel: Channel): Int = when (channel) {

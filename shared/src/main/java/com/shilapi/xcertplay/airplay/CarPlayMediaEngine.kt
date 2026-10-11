@@ -35,6 +35,7 @@ class CarPlayMediaEngine(
     private val microphoneEnabled: Boolean = false,
     private val audioCaptureDirectory: File? = null,
     rcsHandlerFactory: RcsDataStreamHandlerFactory? = null,
+    private val videoPacketLog: ((Int, VideoCodec, Long, ByteArray, ByteArray, ByteArray?) -> Unit)? = null,
 ) : AirPlayMediaHandler {
     internal data class StreamKey(
         val session: AirPlaySession,
@@ -80,6 +81,8 @@ class CarPlayMediaEngine(
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
         val screen = ScreenStream(key) { session.logTrace("screen=$type $it") }
+        var streamCodec = VideoCodec.H264
+        var firstFrameLogged = false
         // The no-display-UUID forceKeyFrame command targets the primary screen.
         // Do not accidentally restart the main screen when the alternate decoder loses sync.
         if (type == STREAM_TYPE_MAIN_SCREEN) {
@@ -89,10 +92,24 @@ class CarPlayMediaEngine(
         }
         val port = screen.listen(
             object : ScreenStream.Listener {
-                override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
-                override fun onConfig(codecData: ByteArray) = sink.onVideoConfig(type, codecData)
-                override fun onFrame(naluBytes: ByteArray, presentationTimeUs: Long?) =
+                override fun onCodec(codec: VideoCodec) {
+                    streamCodec = codec
+                    sink.onVideoCodec(type, codec)
+                }
+                override fun onPacket(sequence: Long, header: ByteArray, wire: ByteArray, plain: ByteArray?) {
+                    videoPacketLog?.invoke(type, streamCodec, sequence, header, wire, plain)
+                }
+                override fun onConfig(codecData: ByteArray) {
+                    session.logDebug("airplay screen config type=$type codec=$streamCodec bytes=${codecData.size}")
+                    sink.onVideoConfig(type, codecData)
+                }
+                override fun onFrame(naluBytes: ByteArray, presentationTimeUs: Long?) {
+                    if (!firstFrameLogged) {
+                        firstFrameLogged = true
+                        session.logDebug("airplay screen first frame type=$type codec=$streamCodec bytes=${naluBytes.size}")
+                    }
                     sink.onVideoFrame(type, naluBytes, presentationTimeUs)
+                }
                 override fun onClosed(cause: Throwable?) {
                     Log.w(
                         TAG,
