@@ -14,6 +14,7 @@ import java.util.ArrayDeque
 class Iap2UsbMuxHost private constructor(
     private val pipe: Iap2UsbSession,
     private val readTimeoutMillis: Long,
+    private val onDiagnostic: (String) -> Unit,
 ) : Closeable {
     private val stateLock = Any()
     private val writeLock = Any()
@@ -24,14 +25,10 @@ class Iap2UsbMuxHost private constructor(
     private var nextMuxAcknowledgement = 0
     private var nextSourcePort = FIRST_SOURCE_PORT
     private lateinit var readerThread: Thread
-    private var receiveBuffer = ByteArray(0)
-
-    private data class MuxFrame(
-        val protocol: Int,
-        val length: Int,
-        val word8: Int,
-        val payload: ByteArray,
-    )
+    private val receiveFrames = UsbMuxFrameBuffer { line ->
+        Log.w("xcertplay-usb", line)
+        runCatching { onDiagnostic(line) }
+    }
 
     /** Opens a TCP byte stream to the iPhone service on [destinationPort]. */
     fun connect(
@@ -116,7 +113,7 @@ class Iap2UsbMuxHost private constructor(
         // a distinct "version reply" here; waiting for it discards the valid reply and times out.
         val deadline = System.nanoTime() + HANDSHAKE_TIMEOUT_MILLIS * NANOS_PER_MILLISECOND
         var staleFrames = 0
-        var reply: MuxFrame
+        var reply: UsbMuxFrame
         while (true) {
             val remainingNanos = deadline - System.nanoTime()
             if (remainingNanos <= 0) {
@@ -144,6 +141,8 @@ class Iap2UsbMuxHost private constructor(
             Log.i("xcertplay-usb", "discarding stale usbmux TCP frame before version reply")
         }
         Log.i("xcertplay-usb", "usbmux version accepted: ${reply.word8}")
+        // Optional reply padding is handled by the incremental framer. Retain a possible
+        // fragmented/coalesced next frame instead of discarding the entire remainder.
         sendFrame(PROTOCOL_SETUP, byteArrayOf(SETUP_VALUE.toByte()))
         readerThread = Thread(::readerLoop, "iap2-usbmux-reader").apply {
             isDaemon = true
@@ -152,31 +151,21 @@ class Iap2UsbMuxHost private constructor(
     }
 
     /** Reads one complete USBMUX frame, keeping partial data buffered across reads. */
-    private fun takeFrame(timeoutMillis: Long): MuxFrame? {
+    private fun takeFrame(timeoutMillis: Long): UsbMuxFrame? {
         val deadline = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
         while (true) {
             synchronized(stateLock) {
                 if (closed) throw IphoneUsbException.DeviceUnavailable("USBMUX host is closed")
-                if (receiveBuffer.size >= MUX_HEADER_BYTES) {
-                    val length = readU32(receiveBuffer, 4)
-                    if (length < MUX_HEADER_BYTES || length > MAX_FRAME_BYTES) {
-                        throw IphoneUsbException.Protocol("Invalid USBMUX frame length $length")
-                    }
-                    if (receiveBuffer.size >= length) {
-                        // LIVI only trusts the length field on receive: iPhone replies do not
-                        // carry the 0xFEEDFACE word in the header's fourth field.
-                        Log.i(
-                            "xcertplay-usb",
-                            "usbmux rx proto=${readU32(receiveBuffer, 0)} length=$length word8=0x" +
-                                readU32(receiveBuffer, 8).toUInt().toString(16),
-                        )
-                        val protocol = readU32(receiveBuffer, 0)
-                        val word8 = readU32(receiveBuffer, 8)
-                        nextMuxAcknowledgement = readU16(receiveBuffer, 12)
-                        val payload = receiveBuffer.copyOfRange(MUX_HEADER_BYTES, length)
-                        receiveBuffer = receiveBuffer.copyOfRange(length, receiveBuffer.size)
-                        return MuxFrame(protocol, length, word8, payload)
-                    }
+                receiveFrames.takeFrame()?.let { frame ->
+                    // LIVI only trusts the length field on receive: iPhone replies do not
+                    // carry the 0xFEEDFACE word in the header's fourth field.
+                    Log.i(
+                        "xcertplay-usb",
+                        "usbmux rx proto=${frame.protocol} length=${frame.length} word8=0x" +
+                            frame.word8.toUInt().toString(16),
+                    )
+                    nextMuxAcknowledgement = frame.sequence
+                    return frame
                 }
             }
             val remainingNanos = deadline - System.nanoTime()
@@ -184,7 +173,7 @@ class Iap2UsbMuxHost private constructor(
             val remainingMillis = (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND
             val bytes = pipe.read(remainingMillis) ?: continue
             synchronized(stateLock) {
-                receiveBuffer += bytes
+                receiveFrames.append(bytes)
             }
         }
     }
@@ -286,7 +275,6 @@ class Iap2UsbMuxHost private constructor(
         private const val MUX_HEADER_BYTES = 16
         private const val TCP_HEADER_BYTES = 20
         private const val TCP_WINDOW_FIELD = 512
-        private const val MAX_FRAME_BYTES = 65_536
         private const val FIRST_SOURCE_PORT = 1
         private const val HANDSHAKE_TIMEOUT_MILLIS = 60_000L
         private const val MAX_STALE_HANDSHAKE_FRAMES = 32
@@ -298,9 +286,10 @@ class Iap2UsbMuxHost private constructor(
         fun open(
             pipe: Iap2UsbSession,
             readTimeoutMillis: Long = 1_000,
+            onDiagnostic: (String) -> Unit = {},
         ): Iap2UsbMuxHost {
             require(readTimeoutMillis > 0) { "readTimeoutMillis must be positive" }
-            return Iap2UsbMuxHost(pipe, readTimeoutMillis).also {
+            return Iap2UsbMuxHost(pipe, readTimeoutMillis, onDiagnostic).also {
                 try {
                     it.begin()
                 } catch (error: Throwable) {

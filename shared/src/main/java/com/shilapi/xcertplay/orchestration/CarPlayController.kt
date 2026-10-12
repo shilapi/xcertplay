@@ -1379,7 +1379,7 @@ class CarPlayController(
         var ncmOwnedLocally = true
         try {
             if (closed) return
-            val mux = Iap2UsbMuxHost.open(usbSession)
+            val mux = Iap2UsbMuxHost.open(usbSession, onDiagnostic = { debugLog(it) })
             this.mux = mux
             debugLog("wired USBMUX host opened")
             onStatus(CarPlayStatus.Pairing)
