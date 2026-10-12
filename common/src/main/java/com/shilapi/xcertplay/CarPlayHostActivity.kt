@@ -73,6 +73,8 @@ import com.shilapi.xcertplay.media.MainMediaAudioBuffer
 import com.shilapi.xcertplay.media.MediaMetricsMonitor
 import com.shilapi.xcertplay.media.MicrophoneGain
 import com.shilapi.xcertplay.media.MicrophoneLevelMonitor
+import com.shilapi.xcertplay.network.BluetoothHandoffSettings
+import com.shilapi.xcertplay.network.BluetoothHandoff
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -948,6 +950,21 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         content.addView(
             buildLocationReportingSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+
+        content.addView(
+            settingsCategoryHeader("Bluetooth"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+        content.addView(
+            buildBluetoothHandoffSection(),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2616,6 +2633,53 @@ class CarPlayHostActivity : ComponentActivity() {
         return section
     }
 
+    /**
+     * What wireless CarPlay's disableBluetooth turns off on the head unit. Both are off by default;
+     * a change applies at once, also during a session.
+     */
+    private fun buildBluetoothHandoffSection(): View {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        section.addView(
+            settingsSwitchRow(
+                label = "Turn off iPhone Bluetooth calls during CarPlay",
+                checked = BluetoothHandoffSettings.callsEnabled(this),
+                description = "Calls go through CarPlay instead of the head unit's hands-free",
+            ) { checked -> BluetoothHandoffSettings.setCallsEnabled(this, checked) },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        section.addView(
+            settingsSwitchRow(
+                label = "Turn off iPhone Bluetooth audio during CarPlay",
+                checked = BluetoothHandoffSettings.audioEnabled(this),
+                description = "Music goes through CarPlay instead of Bluetooth audio",
+            ) { checked -> BluetoothHandoffSettings.setAudioEnabled(this, checked) },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) },
+        )
+        section.addView(
+            menuText(
+                "When the iPhone asks for it during wireless CarPlay (disableBluetooth), the head unit " +
+                    "drops these Bluetooth links to the iPhone. They come back 15 s after CarPlay ends, " +
+                    "when the app exits, or on its next start. Works on Android 10 and earlier; on " +
+                    "later versions the head unit may refuse, which is logged.",
+                14f,
+                MENU_SECONDARY,
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
+        )
+        return section
+    }
+
     private fun buildFullscreenSection(): View {
         val section = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -4006,6 +4070,12 @@ class CarPlayHostActivity : ComponentActivity() {
             sessionLog.append("CarPlay stopped; clean=$clean")
             sessionLog.close()
             Log.i(TAG, "shutdown complete clean=$clean")
+            if (terminateProcess) {
+                // Give the iPhone its Bluetooth links back before the process goes away.
+                runCatching {
+                    BluetoothHandoff.shared(applicationContext).releaseNowBlocking(BLUETOOTH_RESTORE_TIMEOUT_MILLIS)
+                }
+            }
             teardownExecutor.shutdown()
             if (terminateProcess) Process.killProcess(Process.myPid())
         }
@@ -4378,6 +4448,7 @@ class CarPlayHostActivity : ComponentActivity() {
         const val RECONNECT_DELAY_MILLIS = 2_000L
         const val IAP_TUNNEL_RECONNECT_DELAY_MILLIS = 15_000L
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
+        const val BLUETOOTH_RESTORE_TIMEOUT_MILLIS = 5_000L
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
         const val THREE_FINGER_COUNT = 3
         const val THREE_FINGER_SWIPE_DISTANCE_DP = 72

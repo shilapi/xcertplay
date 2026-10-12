@@ -39,4 +39,5 @@ dependencies {
     implementation libs.bouncycastle
     implementation libs.concentus
     testImplementation libs.junit
+    testImplementation 'org.robolectric:robolectric:4.17'
 }

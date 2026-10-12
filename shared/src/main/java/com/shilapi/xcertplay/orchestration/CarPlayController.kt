@@ -40,6 +40,8 @@ import com.shilapi.xcertplay.mfi.LocalMfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
+import com.shilapi.xcertplay.network.BluetoothHandoffSettings
+import com.shilapi.xcertplay.network.BluetoothHandoff
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
@@ -207,6 +209,8 @@ class CarPlayController(
     @Volatile private var vpnService: CarPlayVpnService? = null
     @Volatile private var vpnBound = false
     private val wirelessHandoffRequested = AtomicBoolean(false)
+    /** Turns the iPhone's classic Bluetooth links off when disableBluetooth asks for it (optional). */
+    private val bluetoothHandoff = BluetoothHandoff.shared(appContext).also { it.diagnostic = ::debugLog }
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
     private val wirelessGeneration = AtomicInteger(0)
@@ -241,7 +245,10 @@ class CarPlayController(
         }
 
         override fun onSessionEnded(session: AirPlaySession) {
-            if (activeSession === session) activeSession = null
+            if (activeSession === session) {
+                activeSession = null
+                bluetoothHandoff.releaseLater()
+            }
             debugLog("AirPlay session ended peer=${session.host}")
             uiListener?.onSessionEnded(session)
         }
@@ -280,6 +287,14 @@ class CarPlayController(
                 )
                 armWirelessHandoffWatchdog(wirelessGeneration.get())
                 maybeCompleteWirelessHandoff()
+            }
+            if (
+                config.transport == CarPlayTransport.WIRELESS &&
+                !closed &&
+                activeSession === session &&
+                isBluetoothHandoffCommand(type)
+            ) {
+                handOffFromBluetooth(params["deviceID"]?.toString())
             }
             uiListener?.onCommand(session, type, params)
         }
@@ -434,6 +449,7 @@ class CarPlayController(
             if (closed) return
             closed = true
         }
+        runCatching { bluetoothHandoff.releaseLater() }
         closeReceivers()
         stopFileTransferReceivers()
         availabilityPollGeneration.incrementAndGet()
@@ -1478,6 +1494,26 @@ class CarPlayController(
             cause = cause.cause
         }
         return false
+    }
+
+    /**
+     * disableBluetooth asks the accessory to drop its classic Bluetooth links to the iPhone, so
+     * calls and media go through CarPlay instead of the head unit's hands-free and Bluetooth audio.
+     * Which links are dropped follows BluetoothHandoffSettings; with both off nothing changes.
+     */
+    private fun handOffFromBluetooth(iphoneAddress: String?) {
+        if (iphoneAddress.isNullOrBlank()) {
+            debugLog("disableBluetooth without an iPhone Bluetooth address; leaving Bluetooth connected")
+            return
+        }
+        synchronized(this) {
+            if (closed) return
+            bluetoothHandoff.hold(
+                iphoneAddress,
+                calls = BluetoothHandoffSettings.callsEnabled(appContext),
+                audio = BluetoothHandoffSettings.audioEnabled(appContext),
+            )
+        }
     }
 
     private fun isBluetoothHandoffCommand(type: String): Boolean =
