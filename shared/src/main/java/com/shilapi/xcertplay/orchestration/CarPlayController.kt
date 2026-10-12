@@ -56,6 +56,7 @@ import com.shilapi.xcertplay.transport.Ch341UsbHost
 import com.shilapi.xcertplay.transport.Ch341UsbSession
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.Iap2LocationProvider
+import com.shilapi.xcertplay.transport.Iap2LocationRequest
 import com.shilapi.xcertplay.transport.Iap2UsbMuxHost
 import com.shilapi.xcertplay.transport.Iap2UsbSession
 import com.shilapi.xcertplay.transport.Iap2WiredCarPlayEndpoint
@@ -160,6 +161,8 @@ class CarPlayController(
     private enum class Phase { IDLE, MFI, WIRELESS, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
     private val appContext = context.applicationContext
+    /** Carries the iPhone's Bluetooth location request onto the Wi-Fi tunnel link. */
+    private val wirelessLocationRequest = Iap2LocationRequest()
     private val usbManager = context.getSystemService(UsbManager::class.java)
     private val bluetoothAdapter =
         appContext.getSystemService(BluetoothManager::class.java)?.adapter
@@ -995,6 +998,7 @@ class CarPlayController(
                 endpoint = endpoint,
                 bringUpTimeoutMillis = CONTROL_BRING_UP_TIMEOUT_MILLIS,
                 locationProvider = locationProvider,
+                locationRequest = wirelessLocationRequest,
                 onReady = { activateMediaRemote(channel) },
                 onStopped = { deactivateMediaRemote(channel) },
                 onIncoming = ::onIap2Incoming,
@@ -1079,6 +1083,8 @@ class CarPlayController(
                         endpoint = endpoint,
                         bringUpTimeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
                         locationProvider = locationProvider,
+                        locationRequest = wirelessLocationRequest,
+                        continueLocationRequest = true,
                         onReady = {
                             activateMediaRemote(channel)
                             onWirelessTunnelReady(generation)
@@ -1659,6 +1665,7 @@ class CarPlayController(
     }
 
     private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+        wirelessLocationRequest.components = null
         media.setIapTunnelHandler(null)
         val activeTunnel = wirelessTunnelChannel
         wirelessTunnelChannel = null

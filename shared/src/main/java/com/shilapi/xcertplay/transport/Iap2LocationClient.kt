@@ -29,6 +29,9 @@ data class CarPlayLocationFix(
 
 /** Supplies location data only while the phone has subscribed to iAP2 LocationInformation. */
 interface Iap2LocationProvider : AutoCloseable {
+    /** The 0xFFFA parameter ids, i.e. the sentence types the iPhone asked for; called before [start]. */
+    fun onRequested(components: Set<Int>) = Unit
+
     /** Starts location updates and returns whether at least one source was subscribed. */
     fun start(): Boolean
 
@@ -131,10 +134,194 @@ object NmeaLocationEncoder {
     private const val MINUTE_ROUNDING_TOLERANCE = 0.00005
 }
 
+/**
+ * The iPhone's StartLocationInformation in one wireless session. The iPhone asks on the Bluetooth
+ * iAP2 link and then closes that link, some iPhones after sending 0xFFFC there within milliseconds.
+ * In testing it did not ask again on the Wi-Fi link, even while driving, so the Wi-Fi link carries
+ * the request on.
+ *
+ * Both links share one location provider, so each link holds it while reporting and only the
+ * last link to let go stops it. 0xFFFC on the Bluetooth link ends only that link; on the Wi-Fi
+ * link it stops reporting outright.
+ */
+class Iap2LocationRequest {
+    /** The 0xFFFA parameter ids while a request is running, otherwise null. */
+    @Volatile var components: Set<Int>? = null
+    private var generation = 0
+    private var holders = 0
+
+    @Synchronized
+    internal fun hold(): Int {
+        holders++
+        return generation
+    }
+
+    /** Returns whether no link holds the provider any more. */
+    @Synchronized
+    internal fun release(token: Int): Boolean {
+        if (token != generation) return false
+        holders = (holders - 1).coerceAtLeast(0)
+        return holders == 0
+    }
+
+    @Synchronized
+    internal fun stopAll() {
+        generation++
+        holders = 0
+    }
+}
+
+/**
+ * Accessory side of iAP2 LocationInformation on one link: starts on 0xFFFA, sends the latest fix
+ * on every [tick] (about once a second), stops on 0xFFFC. With [continueRequest], a request that
+ * [request] recorded on the Bluetooth link starts this link too.
+ */
+class Iap2LocationReporter(
+    private val provider: Iap2LocationProvider?,
+    private val onProgress: (String) -> Unit,
+    private val request: Iap2LocationRequest? = null,
+    private val continueRequest: Boolean = false,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    private var active = false
+    private var sentLogged = false
+    private var continued = false
+    private var lastAttemptNanos = 0L
+    private var holdToken: Int? = null
+    private var sentCount = 0L
+
+    /** Handles 0xFFFA/0xFFFC; returns false for any other message. */
+    fun handle(frame: Iap2Frame, send: (Iap2Frame) -> Unit): Boolean = when (frame.messageId) {
+        Iap2LocationMessages.START_LOCATION_INFORMATION -> {
+            val components = Iap2LocationMessages.requestedComponents(frame)
+            onProgress("iap2 rx=0xfffa start-location-information components=$components")
+            request?.components = components
+            provider?.onRequested(components)
+            start(send)
+            true
+        }
+        Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
+            onProgress("iap2 rx=0xfffc stop-location-information")
+            if (request != null && !continueRequest) {
+                // Bluetooth link of a wireless session: the iPhone stops here within milliseconds while
+                // handing the session to Wi-Fi and does not ask again there, so only this link stops.
+                onProgress("iap2 location: Bluetooth link stopped; the request stays for the Wi-Fi link")
+                active = false
+                sentLogged = false
+                releaseProvider()
+            } else {
+                request?.components = null
+                request?.stopAll()
+                holdToken = null
+                active = false
+                sentLogged = false
+                provider?.stop()
+            }
+            true
+        }
+        else -> false
+    }
+
+    /**
+     * Sends the latest fix once a second while active; on the Wi-Fi link first takes over a Bluetooth
+     * request once. The loop calls this after every incoming message too, so it must not send each time:
+     * that sent a dozen fixes in 0.1 s at session start.
+     */
+    fun tick(send: (Iap2Frame) -> Unit) {
+        // The Bluetooth reporter receives STOP_LOCATION_INFORMATION and clears the shared request.
+        // Wi-Fi may already have taken over by then, so its active loop must observe that stop too.
+        if (continueRequest && continued && request?.components == null) {
+            active = false
+            sentLogged = false
+            releaseProvider()
+            return
+        }
+        if (continueRequest && !active && !continued) {
+            val components = request?.components
+            if (components != null) {
+                continued = true
+                onProgress("iap2 location request continues from the Bluetooth link components=$components")
+                provider?.onRequested(components)
+                start(send)
+                return
+            }
+        }
+        if (active && sinceAttemptMillis() >= POLL_INTERVAL_MILLIS) sendLatest(send)
+    }
+
+    /** Wakes the loop when the next fix is due, or every second while a Bluetooth request may still arrive. */
+    fun pollTimeout(remainingMillis: Long): Long = when {
+        active -> min(remainingMillis, (POLL_INTERVAL_MILLIS - sinceAttemptMillis()).coerceAtLeast(1))
+        continueRequest && !continued && provider != null -> min(remainingMillis, POLL_INTERVAL_MILLIS)
+        else -> remainingMillis
+    }
+
+    /** Ends this link's reporting; the provider keeps running while another link still holds it. */
+    fun close() {
+        active = false
+        releaseProvider()
+    }
+
+    private fun sinceAttemptMillis() = (nanoTime() - lastAttemptNanos) / 1_000_000
+
+    private fun start(send: (Iap2Frame) -> Unit) {
+        active = startProvider()
+        sentLogged = false
+        if (active && holdToken == null) holdToken = request?.hold() ?: 0
+        if (active) sendLatest(send)
+    }
+
+    private fun releaseProvider() {
+        val token = holdToken ?: return
+        holdToken = null
+        if (request?.release(token) != false) provider?.stop()
+    }
+
+    private fun startProvider(): Boolean {
+        if (provider == null) return false
+        return try {
+            provider.start().also { started -> if (!started) onProgress("iap2 location provider did not start") }
+        } catch (error: Exception) {
+            onProgress("iap2 location provider start failed: ${error.message}")
+            false
+        }
+    }
+
+    private fun sendLatest(send: (Iap2Frame) -> Unit) {
+        lastAttemptNanos = nanoTime()
+        val sentence = provider?.latestNmea() ?: return
+        send(Iap2LocationMessages.locationInformation(sentence))
+        sentCount++
+        if (!sentLogged) {
+            sentLogged = true
+            onProgress("iap2 tx=0xfffb location-information sentences=${sentenceTypes(sentence)}")
+        } else if (sentCount % REPORT_EVERY_SENT == 0L) {
+            onProgress("iap2 location reports sent=$sentCount sentences=${sentenceTypes(sentence)}")
+        }
+    }
+
+    private fun sentenceTypes(nmea: String): String =
+        nmea.lineSequence().map { it.trim().removePrefix("$").substringBefore(',') }
+            .filter { it.isNotEmpty() }.distinct().joinToString("+")
+
+    private companion object {
+        const val POLL_INTERVAL_MILLIS = 1_000L
+        /** About once every five minutes at one report a second. */
+        const val REPORT_EVERY_SENT = 300L
+    }
+}
+
 object Iap2LocationMessages {
     const val START_LOCATION_INFORMATION = 0xfffa
     const val LOCATION_INFORMATION = 0xfffb
     const val STOP_LOCATION_INFORMATION = 0xfffc
+
+    /** 0xFFFA selector for `$PASCD`; the matching IdentificationInformation flag is 20. */
+    const val VEHICLE_SPEED_DATA = 4
+
+    /** The parameter ids of a 0xFFFA request (the sentence types asked for), or none if unreadable. */
+    fun requestedComponents(frame: Iap2Frame): Set<Int> =
+        runCatching { frame.body().asList().map { it.id }.toSortedSet() }.getOrDefault(emptySet())
 
     fun locationInformation(nmeaSentence: String): Iap2Frame {
         require(nmeaSentence.isNotEmpty()) { "NMEA sentence must not be empty" }

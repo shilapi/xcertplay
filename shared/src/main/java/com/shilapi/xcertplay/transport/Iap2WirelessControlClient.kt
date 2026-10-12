@@ -25,6 +25,8 @@ class Iap2WirelessControlClient(
         endpoint: Iap2WirelessCarPlayEndpoint,
         bringUpTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
+        locationRequest: Iap2LocationRequest? = null,
+        continueLocationRequest: Boolean = false,
         onReady: () -> Unit = {},
         onStopped: () -> Unit = {},
         onIncoming: (Iap2Frame) -> Unit = {},
@@ -69,8 +71,7 @@ class Iap2WirelessControlClient(
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
         var wirelessCarPlayAvailableSeen = false
-        var locationActive = false
-        var locationSentLogged = false
+        val location = Iap2LocationReporter(locationProvider, onProgress, locationRequest, continueLocationRequest)
         var hidStarted = false
         try {
             sendDuringBringUp(
@@ -85,15 +86,8 @@ class Iap2WirelessControlClient(
             onReady()
             // The control session is long-lived. Poll timeouts only wake this loop; they do not end it.
             while (true) {
-                if (locationActive && sendLatestLocation(locationProvider) && !locationSentLogged) {
-                    locationSentLogged = true
-                    onProgress("iap2 tx=0xfffb location-information")
-                }
-                val pollTimeout = if (locationActive) {
-                    LOCATION_POLL_INTERVAL_MILLIS
-                } else {
-                    CONTROL_POLL_INTERVAL_MILLIS
-                }
+                location.tick(::sendDuringControl)
+                val pollTimeout = location.pollTimeout(CONTROL_POLL_INTERVAL_MILLIS)
                 val incoming = session.recv(pollTimeout)
                 if (incoming == null) {
                     if (session.isClosed) {
@@ -195,21 +189,9 @@ class Iap2WirelessControlClient(
                         }
                     }
 
-                    Iap2LocationMessages.START_LOCATION_INFORMATION -> {
-                        onProgress("iap2 rx=0xfffa start-location-information")
-                        locationActive = startLocationUpdates(locationProvider, onProgress)
-                        locationSentLogged = false
-                        if (locationActive && sendLatestLocation(locationProvider)) {
-                            locationSentLogged = true
-                            onProgress("iap2 tx=0xfffb location-information")
-                        }
-                    }
-
+                    Iap2LocationMessages.START_LOCATION_INFORMATION,
                     Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
-                        onProgress("iap2 rx=0xfffc stop-location-information")
-                        locationActive = false
-                        locationSentLogged = false
-                        locationProvider?.stop()
+                        location.handle(incoming, ::sendDuringControl)
                     }
 
                     else -> {
@@ -220,7 +202,7 @@ class Iap2WirelessControlClient(
                 }
             }
         } finally {
-            locationProvider?.stop()
+            location.close()
             if (hidStarted && !session.isClosed) {
                 runCatching {
                     session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
@@ -238,32 +220,6 @@ class Iap2WirelessControlClient(
         session.send(frame, CONTROL_SEND_TIMEOUT_MILLIS)
     }
 
-    private fun sendLatestLocation(
-        provider: Iap2LocationProvider?,
-    ): Boolean {
-        val sentence = provider?.latestNmea() ?: return false
-        session.send(
-            Iap2LocationMessages.locationInformation(sentence),
-            CONTROL_SEND_TIMEOUT_MILLIS,
-        )
-        return true
-    }
-
-    private fun startLocationUpdates(
-        provider: Iap2LocationProvider?,
-        onProgress: (String) -> Unit,
-    ): Boolean {
-        if (provider == null) return false
-        return try {
-            provider.start().also { started ->
-                if (!started) onProgress("iap2 location provider did not start")
-            }
-        } catch (error: Exception) {
-            onProgress("iap2 location provider start failed: ${error.message}")
-            false
-        }
-    }
-
     companion object {
         private const val REQUEST_ACCESSORY_WIFI_CONFIGURATION = 0x5702
         private const val ACCESSORY_WIFI_CONFIGURATION = 0x5703
@@ -271,7 +227,6 @@ class Iap2WirelessControlClient(
         private const val CARPLAY_START_SESSION = 0x4301
         private const val WIRELESS_CARPLAY_UPDATE = 0x4e0d
         private const val DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION = 0x4e0e
-        private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
         private const val CONTROL_POLL_INTERVAL_MILLIS = 60_000L
         private const val CONTROL_SEND_TIMEOUT_MILLIS = 5_000L
         private const val HID_STOP_TIMEOUT_MILLIS = 1_000L
