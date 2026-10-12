@@ -3,7 +3,14 @@
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <application>
+    <!-- A head-unit file picker that cannot grant a picked local MFi document (one running as the
+         system user, as on BYD DiLink) leaves only its file path, read with this permission. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Android 10 head units: direct file reads for local MFi documents (ignored on later versions). -->
+    <application android:requestLegacyExternalStorage="true">
 
         <activity
             android:name="com.shilapi.xcertplay.CarPlayHostActivity"

@@ -91,17 +91,13 @@ class CarPlayRuntimeConfig(
         require(mfiTarget != MfiTarget.LOCAL_FILES || !localMfiPrivateKeyUri.isNullOrBlank()) {
             "A private-key document must be selected for the local-files MFi target"
         }
-        require(
-            mfiTarget != MfiTarget.LOCAL_FILES ||
-                localMfiCertificateUri?.startsWith("content://") == true,
-        ) {
-            "The local MFi certificate must use an Android content URI"
+        // A document picked through Android, or the app's private copy of it (file://) where the
+        // picker cannot grant lasting access.
+        require(mfiTarget != MfiTarget.LOCAL_FILES || isLocalMfiDocumentUri(localMfiCertificateUri)) {
+            "The local MFi certificate must use an Android content URI or a file URI"
         }
-        require(
-            mfiTarget != MfiTarget.LOCAL_FILES ||
-                localMfiPrivateKeyUri?.startsWith("content://") == true,
-        ) {
-            "The local MFi private key must use an Android content URI"
+        require(mfiTarget != MfiTarget.LOCAL_FILES || isLocalMfiDocumentUri(localMfiPrivateKeyUri)) {
+            "The local MFi private key must use an Android content URI or a file URI"
         }
         require(ch341MfiResetGpio == null || ch341MfiResetGpio in 0..5) {
             "CH341 MFi reset GPIO must be D0..D5"
@@ -176,3 +172,6 @@ fun isManualHotspotChannelCompatible(band: ManualHotspotBand, channel: Int): Boo
     ManualHotspotBand.GHZ_2_4 -> channel in 1..14
     ManualHotspotBand.GHZ_5 -> channel in 32..177
 }
+
+private fun isLocalMfiDocumentUri(uri: String?): Boolean =
+    uri != null && (uri.startsWith("content://") || uri.startsWith("file://"))

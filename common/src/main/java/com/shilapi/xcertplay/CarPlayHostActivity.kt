@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay
 
+import android.provider.DocumentsContract
+import android.os.Environment
 import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -236,19 +238,30 @@ class CarPlayHostActivity : ComponentActivity() {
     private val localMfiCertificatePicker =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             externalActivityInProgress = false
-            if (uri != null && retainDocumentReadPermission(uri, "certificate")) {
-                localMfiCertificateUri = uri.toString()
-                updateLocalMfiDocumentViews()
-                mfiErrorView?.visibility = View.GONE
-            }
+            if (uri != null) acceptLocalMfiDocument(uri, LocalMfiDocumentStore.Kind.CERTIFICATE)
         }
     private val localMfiPrivateKeyPicker =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             externalActivityInProgress = false
-            if (uri != null && retainDocumentReadPermission(uri, "private key")) {
-                localMfiPrivateKeyUri = uri.toString()
-                updateLocalMfiDocumentViews()
-                mfiErrorView?.visibility = View.GONE
+            if (uri != null) acceptLocalMfiDocument(uri, LocalMfiDocumentStore.Kind.PRIVATE_KEY)
+        }
+    private val localMfiStore by lazy { LocalMfiDocumentStore(File(filesDir, "mfi")) }
+    /** A picked document waiting for storage permission: which one, and its file path. */
+    private var pendingLocalMfiImport: Pair<LocalMfiDocumentStore.Kind, String>? = null
+    private val storagePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val (kind, path) = pendingLocalMfiImport ?: return@registerForActivityResult
+            pendingLocalMfiImport = null
+            if (granted) {
+                importLocalMfiFromPath(kind, path)
+            } else {
+                appendLog("Local MFi ${kind.folder}: storage permission denied")
+                Toast.makeText(
+                    this,
+                    "Storage permission is needed to read the selected ${localMfiKindLabel(kind)}: " +
+                        "the file picker cannot grant access, so the file is read from its path.",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
 
@@ -1955,6 +1968,8 @@ class CarPlayHostActivity : ComponentActivity() {
         } catch (_: Exception) {
             return "Selection unavailable"
         }
+        val copy = uri.path?.takeIf { uri.scheme == "file" }?.let(::File)
+        if (copy != null && localMfiStore.holds(copy)) return "${copy.name} (private copy)"
         return try {
             contentResolver.query(
                 uri,
@@ -1972,18 +1987,110 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    private fun retainDocumentReadPermission(uri: Uri, label: String): Boolean = try {
-        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        true
-    } catch (failure: SecurityException) {
-        Log.e(TAG, "Could not retain local MFi $label document permission", failure)
-        Toast.makeText(
-            this,
-            "Could not keep access to the selected $label",
-            Toast.LENGTH_LONG,
-        ).show()
-        false
+    /**
+     * Keeps a picked local MFi document readable for later connections: lasting access when the
+     * picker grants it; otherwise a private copy, read through the picker's temporary access or,
+     * where the picker grants nothing (a picker running as the system user, as on BYD DiLink,
+     * cannot grant to other apps), from the document's file path with storage permission.
+     */
+    private fun acceptLocalMfiDocument(uri: Uri, kind: LocalMfiDocumentStore.Kind) {
+        val source = "${uri.scheme}://${uri.authority.orEmpty()}"
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            localMfiStore.clear(kind)
+            setLocalMfiDocument(kind, uri.toString())
+            appendLog("Local MFi ${kind.folder}: kept persistable access to $source")
+            return
+        } catch (refused: SecurityException) {
+            appendLog("Local MFi ${kind.folder}: no persistable access to $source: ${refused.message.orEmpty().take(200)}")
+        }
+        val viaGrant = runCatching { contentResolver.openInputStream(uri)?.use(LocalMfiDocumentStore::readLimited) }
+        viaGrant.getOrNull()?.let { bytes ->
+            saveLocalMfiCopy(kind, pickedDocumentName(uri), bytes, "the picker's temporary access")
+            return
+        }
+        appendLog(
+            "Local MFi ${kind.folder}: cannot open $source: " +
+                (viaGrant.exceptionOrNull()?.let { "${it.javaClass.simpleName} ${it.message.orEmpty().take(160)}" } ?: "no stream"),
+        )
+        val path = LocalMfiDocumentPath.of(
+            uri.scheme,
+            uri.authority,
+            runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull(),
+            uri.path,
+            @Suppress("DEPRECATION") Environment.getExternalStorageDirectory().absolutePath,
+        )
+        if (path == null) {
+            appendLog("Local MFi ${kind.folder}: no file path for $uri")
+            Toast.makeText(
+                this,
+                "Cannot read the selected ${localMfiKindLabel(kind)}. In the file picker, choose it from " +
+                    "internal storage or a USB drive.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2 &&
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            appendLog("Local MFi ${kind.folder}: asking for storage permission to read $path")
+            pendingLocalMfiImport = kind to path
+            storagePermission.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            return
+        }
+        importLocalMfiFromPath(kind, path)
     }
+
+    private fun importLocalMfiFromPath(kind: LocalMfiDocumentStore.Kind, path: String) {
+        val file = File(path)
+        runCatching { file.inputStream().use(LocalMfiDocumentStore::readLimited) }
+            .onSuccess { bytes -> saveLocalMfiCopy(kind, file.name, bytes, path) }
+            .onFailure { failure ->
+                appendLog("Local MFi ${kind.folder}: cannot read $path: ${failure.javaClass.simpleName} ${failure.message.orEmpty().take(160)}")
+                Toast.makeText(
+                    this,
+                    "Cannot read the selected ${localMfiKindLabel(kind)}: ${failure.message.orEmpty()}",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+    }
+
+    private fun saveLocalMfiCopy(kind: LocalMfiDocumentStore.Kind, name: String, bytes: ByteArray, source: String) {
+        runCatching { localMfiStore.save(kind, name, bytes) }
+            .onSuccess { copy ->
+                setLocalMfiDocument(kind, Uri.fromFile(copy).toString())
+                appendLog("Local MFi ${kind.folder}: kept a private copy of $name (${bytes.size} bytes) from $source")
+            }
+            .onFailure { failure ->
+                appendLog("Local MFi ${kind.folder}: cannot keep a private copy: ${failure.javaClass.simpleName} ${failure.message.orEmpty()}")
+                Toast.makeText(
+                    this,
+                    "Cannot read the selected ${localMfiKindLabel(kind)}: ${failure.message.orEmpty()}",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+    }
+
+    private fun setLocalMfiDocument(kind: LocalMfiDocumentStore.Kind, value: String) {
+        when (kind) {
+            LocalMfiDocumentStore.Kind.CERTIFICATE -> localMfiCertificateUri = value
+            LocalMfiDocumentStore.Kind.PRIVATE_KEY -> localMfiPrivateKeyUri = value
+        }
+        updateLocalMfiDocumentViews()
+        mfiErrorView?.visibility = View.GONE
+    }
+
+    private fun localMfiKindLabel(kind: LocalMfiDocumentStore.Kind): String = when (kind) {
+        LocalMfiDocumentStore.Kind.CERTIFICATE -> "certificate"
+        LocalMfiDocumentStore.Kind.PRIVATE_KEY -> "private key"
+    }
+
+    private fun pickedDocumentName(uri: Uri): String =
+        runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "document"
 
     private fun syncMfiSettingsControls() {
         mfiTargetGroup?.let { group ->
@@ -3686,7 +3793,16 @@ class CarPlayHostActivity : ComponentActivity() {
         lastAttemptFailure = null
         handshakePanel?.bind(handshakeTimeline)
         updateDebugOverlays()
-        val config = createRuntimeConfig()
+        // Settings the runtime rejects are reported instead of crashing at every launch.
+        val config = try {
+            createRuntimeConfig()
+        } catch (error: IllegalArgumentException) {
+            val message = "CarPlay not started, the settings are not valid: ${error.message}"
+            appendLog(message)
+            Log.e(TAG, message, error)
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
+        }
         val airPlayConfig = createAirPlayConfig(size)
         val locationProvider: Iap2LocationProvider? =
             if (config.locationReportingEnabled) {
