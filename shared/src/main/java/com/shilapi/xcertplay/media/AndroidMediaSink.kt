@@ -25,7 +25,6 @@ import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.LinkedBlockingQueue
 
 /**
  * Android rendering backend for the CarPlay media engine. Video frames are
@@ -692,7 +691,9 @@ private class AudioRenderer(
 ) : Closeable {
     private data class AudioPacket(val rtp: ByteArray, val sample: Int)
 
-    private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
+    private val queue = AudioPacketQueue<AudioPacket>(MAX_QUEUED_MS * MICROS_PER_MILLI) { packet ->
+        AudioPacketDuration.of(format.codec, format.sampleRate, format.channels, packet.rtp)
+    }
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
@@ -731,11 +732,11 @@ private class AudioRenderer(
     }
 
     fun submit(rtp: ByteArray, sample: Int) {
-        if (!started || !queue.offer(AudioPacket(rtp, sample))) {
-            if (started && !droppedPacketsLogged) {
-                droppedPacketsLogged = true
-                Log.w(TAG, "audio queue full; dropping newest packets to bound latency")
-            }
+        if (!started) return
+        val dropped = queue.offer(AudioPacket(rtp, sample))
+        if (dropped > 0 && !droppedPacketsLogged) {
+            droppedPacketsLogged = true
+            Log.w(TAG, "audio queue over ${MAX_QUEUED_MS}ms; dropping the oldest packets to bound latency")
         }
     }
 
@@ -1226,7 +1227,12 @@ private class AudioRenderer(
         const val OPUS_CODEC_DELAY_NANOS = 6_500_000L
         const val OPUS_SEEK_PRE_ROLL_NANOS = 80_000_000L
         const val INPUT_TIMEOUT_US = 10_000L
-        const val MAX_QUEUED_PACKETS = 64
+        /**
+         * Audio waiting while the output is created and afterwards. Creating the codec and the
+         * AudioTrack took about 1.2 s on a BYD head unit, longer than 64 packets of wired LPCM.
+         */
+        const val MAX_QUEUED_MS = 2_000L
+        const val MICROS_PER_MILLI = 1_000L
         const val MIN_TRACK_BUFFER_BYTES = 16 * 1024
         const val MIN_START_BUFFER_BYTES = 4 * 1024
         const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
