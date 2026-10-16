@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.util.Log
 import androidx.annotation.RequiresApi
 import com.shilapi.xcertplay.transport.Iap2WirelessSecurity
 import java.io.IOException
@@ -29,7 +30,10 @@ import java.util.concurrent.TimeUnit
  * the AP interface is usable. The reservation and multicast lock stay owned by this instance
  * until [close].
  */
-class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
+class LocalOnlyHotspotManager(
+    context: Context,
+    private val diagnostic: (String) -> Unit = {},
+) : WirelessHotspotManager {
     private val connectivityManager =
         context.applicationContext.getSystemService(ConnectivityManager::class.java)
     private val wifiManager = context.applicationContext.getSystemService(WifiManager::class.java)
@@ -69,13 +73,33 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
         val preStartInterfaces = networkInterfaceNames()
 
         try {
-            ensureStartActive(attempt)
-            wifiManager.startLocalOnlyHotspot(
-                createCallback(attempt),
-                Handler(thread.looper),
-            )
-
-            val activeReservation = awaitStart(attempt, deadlineNanos, timeoutMillis)
+            var retries = 0
+            var startedReservation: WifiManager.LocalOnlyHotspotReservation? = null
+            while (startedReservation == null) {
+                ensureStartActive(attempt)
+                wifiManager.startLocalOnlyHotspot(
+                    createCallback(attempt),
+                    Handler(thread.looper),
+                )
+                try {
+                    startedReservation = awaitStart(attempt, deadlineNanos, timeoutMillis)
+                } catch (rejected: LocalOnlyHotspotRejected) {
+                    if (!LocalOnlyHotspotRetry.shouldRetry(rejected.reason, retries)) throw rejected
+                    // The radio is still releasing a previous hotspot or Wi-Fi Direct group.
+                    retries++
+                    val delayMillis = LocalOnlyHotspotRetry.delayMillis(retries)
+                    report("LocalOnlyHotspot ${failureReason(rejected.reason)}; retry $retries in ${delayMillis}ms")
+                    synchronized(stateLock) {
+                        attempt.failure = null
+                        // wait(0) would block forever, so an exhausted deadline fails instead.
+                        val waitNanos = minOf(delayMillis * NANOS_PER_MILLISECOND, deadlineNanos - System.nanoTime())
+                        if (waitNanos <= 0) throw rejected
+                        waitNanos(waitNanos)
+                        ensureStartActiveLocked(attempt)
+                    }
+                }
+            }
+            val activeReservation = startedReservation
             acquiredMulticastLock = acquireMulticastLock(attempt)
             val configuration = readConfiguration(activeReservation)
             val apInterface = awaitApInterface(
@@ -160,7 +184,8 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
             override fun onFailed(reason: Int) {
                 synchronized(stateLock) {
                     if (startAttempt === attempt && attempt.failure == null) {
-                        attempt.failure = IOException(
+                        attempt.failure = LocalOnlyHotspotRejected(
+                            reason,
                             "LocalOnlyHotspot failed: ${failureReason(reason)}",
                         )
                         stateLock.notifyAll()
@@ -657,6 +682,13 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
         }
     }
 
+    private fun report(message: String) {
+        Log.i(TAG, message)
+        runCatching { diagnostic(message) }
+    }
+
+    private class LocalOnlyHotspotRejected(val reason: Int, message: String) : IOException(message)
+
     private class StartAttempt {
         var thread: HandlerThread? = null
         var reservation: WifiManager.LocalOnlyHotspotReservation? = null
@@ -681,8 +713,27 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
     )
 
     private companion object {
+        const val TAG = "xcertplay-local-only-hotspot"
         const val MULTICAST_LOCK_TAG = "xcertplay-local-only-hotspot-mdns"
         const val NANOS_PER_MILLISECOND = 1_000_000L
         val INTERFACE_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(100)
     }
+}
+
+/** Which LocalOnlyHotspot failures are worth asking for again, and how long to wait first. */
+internal object LocalOnlyHotspotRetry {
+    const val MAX_RETRIES = 3
+
+    /**
+     * Generic and incompatible-mode failures are what a radio still releasing a previous hotspot or
+     * Wi-Fi Direct group reports; no channel or disallowed tethering does not change by waiting.
+     */
+    fun shouldRetry(reason: Int, retries: Int): Boolean =
+        retries < MAX_RETRIES && (
+            reason == WifiManager.LocalOnlyHotspotCallback.ERROR_GENERIC ||
+                reason == WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE
+            )
+
+    /** 0.5 s, 1 s, 1.5 s, the same steps Wi-Fi Direct uses. */
+    fun delayMillis(retry: Int): Long = P2pCreateRetry.busyDelayMillis(retry)
 }
