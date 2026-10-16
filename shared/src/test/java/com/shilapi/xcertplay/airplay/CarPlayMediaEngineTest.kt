@@ -81,6 +81,36 @@ class CarPlayMediaEngineTest {
     }
 
     @Test
+    fun teardownStopsEveryAudioTypeSharingTheStreamType() {
+        val stopped = mutableListOf<AudioStreamId>()
+        val sink = object : MediaSink {
+            override fun onAudioStopped(id: AudioStreamId) {
+                stopped += id
+            }
+        }
+        val session = testSession()
+        val engine = CarPlayMediaEngine(sink)
+        val streamsField = CarPlayMediaEngine::class.java.getDeclaredField("streams").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val streams = streamsField.get(engine) as
+            MutableMap<CarPlayMediaEngine.StreamKey, Closeable>
+        streams[CarPlayMediaEngine.StreamKey(session, 100, "media")] = Closeable {}
+        streams[CarPlayMediaEngine.StreamKey(session, 100, "speechrecognition")] = Closeable {}
+        streams[CarPlayMediaEngine.StreamKey(session, 101, "media")] = Closeable {}
+
+        engine.onTeardown(session, 100)
+        session.close()
+
+        assertEquals(
+            setOf(AudioStreamId(100, "media"), AudioStreamId(100, "speechrecognition")),
+            stopped.toSet(),
+        )
+        assertEquals(setOf(CarPlayMediaEngine.StreamKey(session, 101, "media")), streams.keys)
+    }
+
+    @Test
     fun microphoneFollowsThePhonesInputPortForAnyMainAudioCategory() {
         val requested = mapOf("audioType" to "default", "dataPort" to 12345)
         assertEquals(12345, requestedMicrophonePort(true, 100, requested))
@@ -106,12 +136,12 @@ class CarPlayMediaEngineTest {
     fun microphoneStartsAfterSetupResponseWithoutWaitingForDownlinkAudio() {
         val events = mutableListOf<String>()
         val sink = object : MediaSink {
-            override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
-                events += "start:$type:${config.audioType}"
+            override fun onMicrophoneStarted(id: AudioStreamId, config: MicrophoneConfig) {
+                events += "start:${id.type}:${config.audioType}"
             }
 
-            override fun onMicrophoneStopped(type: Int) {
-                events += "stop:$type"
+            override fun onMicrophoneStopped(id: AudioStreamId) {
+                events += "stop:${id.type}"
             }
         }
         val session = testSession()
@@ -145,11 +175,11 @@ class CarPlayMediaEngineTest {
     fun sessionCloseStopsAnActiveMicrophone() {
         val events = mutableListOf<String>()
         val sink = object : MediaSink {
-            override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
+            override fun onMicrophoneStarted(id: AudioStreamId, config: MicrophoneConfig) {
                 events += "start"
             }
 
-            override fun onMicrophoneStopped(type: Int) {
+            override fun onMicrophoneStopped(id: AudioStreamId) {
                 events += "stop"
             }
         }
