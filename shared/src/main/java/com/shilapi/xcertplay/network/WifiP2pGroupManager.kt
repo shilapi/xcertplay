@@ -111,9 +111,31 @@ class WifiP2pGroupManager(
                 config.groupOwnerIntent = WifiP2pConfig.GROUP_OWNER_INTENT_MAX
             }
 
-            ensureStartActive(attempt)
-            p2pManager.createGroup(p2pChannel, config, createActionListener(attempt))
-            awaitGroupCreated(attempt, deadlineNanos, timeoutMillis)
+            var busyRetries = 0
+            while (true) {
+                ensureStartActive(attempt)
+                p2pManager.createGroup(p2pChannel, config, createActionListener(attempt))
+                try {
+                    awaitGroupCreated(attempt, deadlineNanos, timeoutMillis)
+                    break
+                } catch (rejected: P2pCreateRejected) {
+                    // Only an explicit BUSY rejection permits another request; a timeout may
+                    // still create a group, so it is never retried.
+                    if (!P2pCreateRetry.shouldRetry(rejected.reason, busyRetries)) throw rejected
+                    // The radio is still releasing a previous hotspot or group.
+                    busyRetries++
+                    val delayMillis = P2pCreateRetry.busyDelayMillis(busyRetries)
+                    Log.w(TAG, "Wi-Fi P2P busy; retry $busyRetries in ${delayMillis}ms")
+                    synchronized(stateLock) {
+                        attempt.failure = null
+                        // wait(0) would block forever, so an exhausted deadline fails instead.
+                        val waitNanos = minOf(delayMillis * NANOS_PER_MILLISECOND, remainingNanos(deadlineNanos))
+                        if (waitNanos <= 0) throw rejected
+                        waitNanos(waitNanos)
+                        ensureStartActiveLocked(attempt)
+                    }
+                }
+            }
 
             val group = awaitUsableGroup(
                 attempt = attempt,
@@ -190,7 +212,7 @@ class WifiP2pGroupManager(
         override fun onFailure(reason: Int) {
             failAttempt(
                 attempt,
-                IOException("Wi-Fi P2P createGroup failed: ${failureReason(reason)}"),
+                P2pCreateRejected(reason, "Wi-Fi P2P createGroup failed: ${failureReason(reason)}"),
             )
         }
     }
@@ -499,6 +521,9 @@ class WifiP2pGroupManager(
         var stopped = false
     }
 
+    /** createGroup's onFailure, with the WifiP2pManager reason so BUSY can be retried. */
+    private class P2pCreateRejected(val reason: Int, message: String) : IOException(message)
+
     private companion object {
         const val TAG = "xcertplay-usb"
         const val NANOS_PER_MILLISECOND = 1_000_000L
@@ -511,3 +536,19 @@ private const val WIFI_P2P_SSID_PREFIX = "DIRECT-xcertplay"
 private const val MFI_CERTIFICATE_SSID_SUFFIX_LENGTH = 4
 private const val MFI_CERTIFICATE_PASSPHRASE_LENGTH = 8
 private const val HEX_DIGITS = "0123456789abcdef"
+
+/**
+ * Right after a LocalOnlyHotspot or another group is stopped, createGroup is rejected with BUSY while
+ * the radio releases it. That rejection is retried a few times on growing delays within the startup
+ * deadline; any other rejection fails at once, as before.
+ */
+internal object P2pCreateRetry {
+    const val MAX_BUSY_RETRIES = 3
+    private const val BUSY_RETRY_STEP_MILLIS = 500L
+
+    fun shouldRetry(reason: Int, busyRetries: Int): Boolean =
+        reason == WifiP2pManager.BUSY && busyRetries < MAX_BUSY_RETRIES
+
+    /** 0.5 s, 1 s, 1.5 s: enough for a hotspot that was just stopped to release the radio. */
+    fun busyDelayMillis(retry: Int): Long = BUSY_RETRY_STEP_MILLIS * retry
+}
