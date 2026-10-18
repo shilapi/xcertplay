@@ -121,6 +121,7 @@ class MfiAuthenticationClient(
 
     private fun bestEffortErrorCode(): Int? = try {
         selectRegister(ERROR_REGISTER)
+        sleepMicros(REGISTER_READ_SETTLE_MICROS)
         val result = transport.transaction(address7Bit, ByteArray(0), 1)
         if (result.size == 1) result[0].toInt() and BYTE_MASK else null
     } catch (_: I2cTransportException) {
@@ -146,6 +147,12 @@ class MfiAuthenticationClient(
             // not surface that I2C NACK separately, so retry the complete select/read pair; a
             // retry of only the pure-read half can otherwise keep reading the old register.
             selectRegisterOnce(register)
+            // The coprocessor needs a brief settle time after the register-select write before
+            // the selected register can be read. A back-to-back read over raw Linux I2C (sub-ms
+            // turnaround) NACKs the read (surfaces as errno 5 / I2C_RDWR failure); on CH341 the
+            // USB round-trip latency hid this. Measured on an Apple Accessories coprocessor: 0ms
+            // fails every time, >=2ms reads reliably. retryIo still backstops a marginal read.
+            sleepMicros(REGISTER_READ_SETTLE_MICROS)
             val result = transport.transaction(address7Bit, ByteArray(0), length)
             if (result.size != length) {
                 throw MfiInvalidDataException(
@@ -240,6 +247,7 @@ class MfiAuthenticationClient(
         private const val MAXIMUM_CHALLENGE_BYTES = 128
         private const val IO_RETRY_TIMEOUT_MILLIS = 2_000L
         private const val IO_RETRY_DELAY_MICROS = 20_000L
+        private const val REGISTER_READ_SETTLE_MICROS = 5_000L
         private const val INITIAL_AUTH_DELAY_MILLIS = 10L
         private const val AUTH_POLL_MILLIS = 10L
         private const val AUTH_TIMEOUT_MILLIS = 3_000L
