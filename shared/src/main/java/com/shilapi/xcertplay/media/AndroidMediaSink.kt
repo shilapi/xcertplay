@@ -19,6 +19,7 @@ import android.util.Log
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.AudioFormat
+import com.shilapi.xcertplay.airplay.AudioStreamId
 import com.shilapi.xcertplay.airplay.MediaSink
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoAccessUnit
@@ -58,8 +59,8 @@ class AndroidMediaSink(
     @Volatile private var screenStreamActiveChanged = onScreenStreamActiveChanged
     private val surfaces = ConcurrentHashMap<Int, Surface>()
     private val videoDecoders = ConcurrentHashMap<Int, VideoDecoder>()
-    private val audioRenderers = ConcurrentHashMap<Int, AudioRenderer>()
-    private val microphoneUplinks = ConcurrentHashMap<Int, MicrophoneUplink>()
+    private val audioRenderers = ConcurrentHashMap<AudioStreamId, AudioRenderer>()
+    private val microphoneUplinks = ConcurrentHashMap<AudioStreamId, MicrophoneUplink>()
     private val videoRecoveryHandlers = ConcurrentHashMap<Int, () -> Boolean>()
     private val pendingVideoCodec = ConcurrentHashMap<Int, VideoCodec>()
     private val videoConfigs = ConcurrentHashMap<Int, Pair<VideoCodec, ByteArray>>()
@@ -160,28 +161,28 @@ class AndroidMediaSink(
 
     private fun forwarded(type: Int) = mediaTap?.forwardsVideo(type) == true
 
-    override fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {
-        audioRenderer(type, format).start()
+    override fun onAudioStarted(id: AudioStreamId, format: AudioFormat, firstSample: Int) {
+        audioRenderer(id, format).start()
     }
 
-    override fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {
-        audioRenderer(type, format).submit(rtp, sample)
+    override fun onAudioRtp(id: AudioStreamId, format: AudioFormat, rtp: ByteArray, sample: Int) {
+        audioRenderer(id, format).submit(rtp, sample)
     }
 
-    override fun onAudioStopped(type: Int) {
-        audioRenderers.remove(type)?.close()
-        mediaTap?.onAudioStopped(type)
+    override fun onAudioStopped(id: AudioStreamId) {
+        audioRenderers.remove(id)?.close()
+        mediaTap?.onAudioStopped(id.type)
     }
 
-    override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
-        val uplink = microphoneUplinks.computeIfAbsent(type) {
+    override fun onMicrophoneStarted(id: AudioStreamId, config: MicrophoneConfig) {
+        val uplink = microphoneUplinks.computeIfAbsent(id) {
             MicrophoneUplink(context, config, microphoneGainPercent)
         }
-        if (!uplink.start()) microphoneUplinks.remove(type, uplink)
+        if (!uplink.start()) microphoneUplinks.remove(id, uplink)
     }
 
-    override fun onMicrophoneStopped(type: Int) {
-        microphoneUplinks.remove(type)?.close()
+    override fun onMicrophoneStopped(id: AudioStreamId) {
+        microphoneUplinks.remove(id)?.close()
     }
 
     fun close() {
@@ -213,19 +214,19 @@ class AndroidMediaSink(
         }
 
     @Synchronized
-    private fun audioRenderer(type: Int, format: AudioFormat): AudioRenderer {
-        val existing = audioRenderers[type]
+    private fun audioRenderer(id: AudioStreamId, format: AudioFormat): AudioRenderer {
+        val existing = audioRenderers[id]
         if (existing?.format == format) return existing
         existing?.close()
         return AudioRenderer(
-            type,
+            id.type,
             format,
             advancedAudioChannelMapping,
             mainMediaAudioBufferDurationMs,
             mediaMetricsMonitor,
             mediaTap,
         ).also {
-            audioRenderers[type] = it
+            audioRenderers[id] = it
         }
     }
 
