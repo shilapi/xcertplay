@@ -26,7 +26,7 @@ class CarPlayBonjourTest {
         assertEquals(
             linkedMapOf(
                 "deviceid" to "02:00:00:00:00:02",
-                "features" to "0x44540380,0x61",
+                "features" to "0x5A7FFFF7,0x1E",
                 "flags" to "0x4",
                 "model" to "LIVI",
                 "srcvers" to "366.0",
