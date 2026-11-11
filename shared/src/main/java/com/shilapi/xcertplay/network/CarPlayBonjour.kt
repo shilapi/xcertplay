@@ -58,6 +58,28 @@ object CarPlayBonjourProtocol {
         "pk" to identity.publicKeyHex,
     )
 
+    fun raopTxtRecords(
+        config: AirPlayConfig,
+        identity: AirPlayIdentity,
+    ): Map<String, String> = linkedMapOf(
+        "txtvers" to "1",
+        "ch" to "2",
+        "cn" to "0,1,2,3",
+        "et" to "0,3,5",
+        "sv" to "false",
+        "da" to "true",
+        "sr" to "44100",
+        "ss" to "16",
+        "pw" to "false",
+        "vn" to "65537",
+        "tp" to "UDP",
+        "md" to "0,1,2",
+        "vs" to "130.14",
+        "am" to config.model,
+        "pk" to identity.publicKeyHex,
+        "sf" to "0x4",
+    )
+
     fun connectProbeRequest(
         host: String,
         port: Int,
@@ -126,6 +148,8 @@ class CarPlayBonjour(
     private var worker: Thread? = null
     @Volatile
     private var activeSocket: Socket? = null
+    private var rawMdns: RawMdnsResponder? = null
+    private var rawRaop: RawMdnsResponder? = null
 
     private val registrationListener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) = Unit
@@ -195,6 +219,10 @@ class CarPlayBonjour(
                     registrationRequested = false
                     runCatching { nsdManager.unregisterService(registrationListener) }
                 }
+                runCatching { rawMdns?.close() }
+                rawMdns = null
+                runCatching { rawRaop?.close() }
+                rawRaop = null
                 if (discoveryRequested) {
                     discoveryRequested = false
                     runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
@@ -215,6 +243,10 @@ class CarPlayBonjour(
                 registrationRequested = false
                 runCatching { nsdManager.unregisterService(registrationListener) }
             }
+            runCatching { rawMdns?.close() }
+            rawMdns = null
+            runCatching { rawRaop?.close() }
+            rawRaop = null
             if (discoveryRequested) {
                 discoveryRequested = false
                 runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
@@ -231,6 +263,40 @@ class CarPlayBonjour(
 
     @Suppress("DEPRECATION")
     private fun registerAirPlay() {
+        val address = localAdvertisedAddress
+        if (address is Inet4Address) {
+            // NsdManager publishes no address record on API 34 (hostname null, no
+            // addresses), which leaves the SRV target unresolvable, so AirPlay
+            // clients never connect. Answer mDNS ourselves, with an explicit A record.
+            val responder = RawMdnsResponder(
+                hostLabel = rawHostLabel(),
+                address = address,
+                port = config.port,
+                serviceType = AIRPLAY_SERVICE_TYPE,
+                instanceName = config.deviceName,
+                txt = CarPlayBonjourProtocol.airPlayTxtRecords(config, identity),
+            )
+            val published = runCatching { responder.start() }
+                .onFailure { Log.w(TAG, "raw mDNS advertising failed, falling back to NSD", it) }
+                .isSuccess
+            if (published) {
+                rawMdns = responder
+                // AirPlay 1 style receivers also publish _raop._tcp; iOS lists a
+                // receiver only when it sees the record set it expects.
+                val raop = RawMdnsResponder(
+                    hostLabel = rawHostLabel(),
+                    address = address,
+                    port = config.port,
+                    serviceType = RAOP_SERVICE_TYPE,
+                    instanceName = raopInstanceName(),
+                    txt = CarPlayBonjourProtocol.raopTxtRecords(config, identity),
+                )
+                runCatching { raop.start() }
+                    .onSuccess { rawRaop = raop }
+                    .onFailure { Log.w(TAG, "raw _raop advertising failed", it) }
+                return
+            }
+        }
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = config.deviceName
             serviceType = AIRPLAY_SERVICE_TYPE
@@ -245,6 +311,18 @@ class CarPlayBonjour(
             NsdManager.PROTOCOL_DNS_SD,
             registrationListener,
         )
+    }
+
+    private fun raopInstanceName(): String =
+        config.deviceId.replace(":", "").uppercase() + "@" + config.deviceName
+
+    private fun rawHostLabel(): String {
+        val label = config.deviceName
+            .lowercase()
+            .map { if (it.isLetterOrDigit() && it.code < 128) it else '-' }
+            .joinToString("")
+            .trim('-')
+        return label.ifEmpty { "xcertplay" }
     }
 
     private fun advertisedHostAddress(): InetAddress? {
@@ -477,6 +555,7 @@ class CarPlayBonjour(
         const val WORKER_NAME = "carplay-bonjour"
         const val AIRPLAY_SERVICE_TYPE = "_airplay._tcp"
         const val CARPLAY_CONTROL_SERVICE_TYPE = "_carplay-ctrl._tcp"
+        const val RAOP_SERVICE_TYPE = "_raop._tcp"
         const val WORKER_POLL_MILLIS = 500L
         const val RESOLVE_ATTEMPTS = 3
         const val RESOLVE_TIMEOUT_MILLIS = 10_000L
