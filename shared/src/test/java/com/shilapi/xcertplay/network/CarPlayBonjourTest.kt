@@ -26,7 +26,7 @@ class CarPlayBonjourTest {
         assertEquals(
             linkedMapOf(
                 "deviceid" to "02:00:00:00:00:02",
-                "features" to "0x44540380,0x61",
+                "features" to "0x5A7FFFF7,0x1E",
                 "flags" to "0x4",
                 "model" to "LIVI",
                 "srcvers" to "366.0",
@@ -35,6 +35,31 @@ class CarPlayBonjourTest {
                 "pk" to "0123ab",
             ),
             CarPlayBonjourProtocol.airPlayTxtRecords(config, identity),
+        )
+    }
+
+    @Test
+    fun raopTxtRecordsMatchLivi() {
+        assertEquals(
+            linkedMapOf(
+                "txtvers" to "1",
+                "ch" to "2",
+                "cn" to "0,1,2,3",
+                "et" to "0,3,5",
+                "sv" to "false",
+                "da" to "true",
+                "sr" to "44100",
+                "ss" to "16",
+                "pw" to "false",
+                "vn" to "65537",
+                "tp" to "UDP",
+                "md" to "0,1,2",
+                "vs" to "130.14",
+                "am" to "LIVI",
+                "pk" to "0123ab",
+                "sf" to "0x4",
+            ),
+            CarPlayBonjourProtocol.raopTxtRecords(config, identity),
         )
     }
 
